@@ -1,0 +1,10 @@
+# Ignore environment variables
+.env
+
+# Ignore SQLite database file
+receipts.db
+
+# Ignore Python environment files
+__pycache__/
+.venv/
+ven
