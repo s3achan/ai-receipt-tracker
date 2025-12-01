@@ -1,8 +1,6 @@
 # 🧾 AI-Powered Receipt Classifier and Spending Tracker
 
 
-This is a complete and robust Streamlit application designed to parse PDF receipts, categorize items using an OpenAI API with memory (user-defined category mapping), store the data persistently in an SQLite database using SQLAlchemy, and display interactive spending analytics.
-
 An end-to-end Python application using **Streamlit** for the frontend, **OpenAI (GPT-4o-mini)** for receipt parsing and item classification, and **SQLAlchemy/SQLite** for robust data persistence. This tool automates the tedious process of entering purchase data, learns your preferred categories, and provides real-time spending analytics.
 
 
@@ -17,7 +15,6 @@ An end-to-end Python application using **Streamlit** for the frontend, **OpenAI 
     - Category breakdown (using Plotly pie charts and bar charts).
     - Monthly spending trends.
 - **Data Management UI:** Provides a dedicated sidebar interface for non-technical users to edit receipt metadata and recategorize historical items.
-
 
 
 ## 🧱 Architecture Overview
@@ -40,7 +37,7 @@ The application follows an event-driven data pipeline:
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/YourUsername/costco-receipt-tracker.git](https://github.com/YourUsername/costco-receipt-tracker.git)
+    git clone https://github.com/s3achan/ai-receipt-tracker.git
     cd costco-receipt-tracker
     ```
 
