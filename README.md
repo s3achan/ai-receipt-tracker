@@ -3,6 +3,11 @@
 
 An end-to-end Python application using **Streamlit** for the frontend, **OpenAI (GPT-4o-mini)** for receipt parsing and item classification, and **SQLAlchemy/SQLite** for robust data persistence. This tool automates the tedious process of entering purchase data, learns your preferred categories, and provides real-time spending analytics.
 
+## Application Overeiw 
+
+![Spending Tracker Dashboard](assets/snapshot.png)
+
+
 
 ## 🚀 Key Features
 
@@ -38,7 +43,7 @@ The application follows an event-driven data pipeline:
 1.  **Clone the repository:**
     ```bash
     git clone https://github.com/s3achan/ai-receipt-tracker.git
-    cd costco-receipt-tracker
+    cd ai-receipt-tracker
     ```
 
 2.  **Create and activate a virtual environment:**
