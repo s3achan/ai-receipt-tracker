@@ -1,6 +1,6 @@
 # Ignore environment variables
 .env
-
+.streamlit/
 # Ignore SQLite database file
 receipts.db
 
