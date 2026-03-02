@@ -1,6 +1,7 @@
 # Ignore environment variables
 .env
 .streamlit/
+.data/
 
 # Ignore SQLite database file
 *.db 
