@@ -222,13 +222,12 @@ class Receipt(Base):
 
 class ReceiptItem(Base):
     __tablename__ = "receipt_items"
-    id:           Mapped[int]            = mapped_column(Integer, primary_key=True)
-    receipt_id:   Mapped[int]            = mapped_column(ForeignKey("receipts.id"), index=True)
-    date:         Mapped[date]           = mapped_column(SQLDate, nullable=False)
-    name:         Mapped[str]            = mapped_column(String, nullable=False)
-    category:     Mapped[str]            = mapped_column(String, nullable=False)
-    sub_category: Mapped[Optional[str]]  = mapped_column(String, nullable=True)
-    price:        Mapped[Optional[float]]= mapped_column(Float)
+    id:         Mapped[int]            = mapped_column(Integer, primary_key=True)
+    receipt_id: Mapped[int]            = mapped_column(ForeignKey("receipts.id"), index=True)
+    date:       Mapped[date]           = mapped_column(SQLDate, nullable=False)
+    name:       Mapped[str]            = mapped_column(String, nullable=False)
+    category:   Mapped[str]            = mapped_column(String, nullable=False)
+    price:      Mapped[Optional[float]]= mapped_column(Float)
     receipt: Mapped[Receipt] = relationship("Receipt", back_populates="items")
 
 class ApiLog(Base):
@@ -249,10 +248,9 @@ def _run_migrations():
     Handles both SQLite and PostgreSQL.
     """
     migrations = [
-        ("receipts",      "file_hash",    "VARCHAR"),
-        ("receipts",      "created_at",   "TIMESTAMP"),
-        ("api_logs",      "purpose",      "VARCHAR"),
-        ("receipt_items", "sub_category", "VARCHAR"),
+        ("receipts",  "file_hash",  "VARCHAR"),
+        ("receipts",  "created_at", "TIMESTAMP"),
+        ("api_logs",  "purpose",    "VARCHAR"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -339,19 +337,18 @@ def load_dynamic_categories():
         session.close()
 
 def get_item_category_mapping() -> dict:
-    """Returns {item_name_lower: {"category": ..., "sub_category": ...}}"""
     session = SessionLocal()
     mapping: dict = {}
     try:
         if inspect(engine).has_table("receipt_items"):
             rows = (
-                session.query(ReceiptItem.name, ReceiptItem.category, ReceiptItem.sub_category, Receipt.date)
+                session.query(ReceiptItem.name, ReceiptItem.category, Receipt.date)
                 .join(Receipt).order_by(Receipt.date.desc()).all()
             )
-            for name, category, sub_category, _ in rows:
+            for name, category, _ in rows:
                 key = str(name).strip().lower()
                 if key and key not in mapping:
-                    mapping[key] = {"category": category, "sub_category": sub_category or ""}
+                    mapping[key] = category
     except Exception as e:
         logger.warning("get_item_category_mapping: %s", e)
     finally:
@@ -535,65 +532,23 @@ Fields required:
 - subtotal, tax, total (numbers)
 - lines: ordered list of ITEM or DISCOUNT lines
 
-ITEM: {{"type":"item","name":"...","category":"...","sub_category":"...","price":0.0,"taxable":false}}
-DISCOUNT: {{"type":"discount","amount":0.0,"raw":"4.00-"}}
+ITEM:   {{"type":"item","name":"...","category":"...","price":0.0,"taxable":false}}
+DISCOUNT:{{"type":"discount","amount":0.0,"raw":"4.00-"}}
 
 Rules:
-- TAX MARKERS:
-  * Costco: Y → taxable:true, N → taxable:false
-  * Target/Walmart: T → taxable:true, N or N+ → taxable:false
-- Discount line like "/2189436 4.00-" → DISCOUNT type, immediately after that item.
+- Costco Y marker → taxable:true. N marker → taxable:false.
+- Discount line like "/2189436 4.00-" → DISCOUNT immediately after that item.
 - Keep item price as BASE price; discounts applied in code.
-- category: pick best fit from this list: {category_list}
-- sub_category: be specific about what the item actually is based on its name.
-  Examples by category:
-  Meat & Seafood → Chicken, Beef, Pork, Salmon, Shrimp, Deli Meat, Turkey
-  Produce → Berries, Apples, Bananas, Salad Mix, Spinach, Broccoli, Avocado
-  Dairy & Eggs → Milk, Shredded Cheese, String Cheese, Greek Yogurt, Butter, Eggs
-  Bakery & Bread → Bread, Muffins, Croissants, Tortillas, Bagels
-  Frozen Foods → Frozen Meals, Frozen Vegetables, Ice Cream, Pizza, Waffles
-  Pantry & Dry Goods → Pasta, Rice, Canned Tomatoes, Olive Oil, Hot Sauce, Spices
-  Snacks & Candy → Chips, Mixed Nuts, Protein Bars, Cookies, Chocolate, Crackers, Trail Mix
-  Beverages & Coffee → Water, Orange Juice, Coffee Pods, Energy Drinks, Sports Drinks, Wine
-  Household & Cleaning → Dish Soap, Trash Bags, Ziploc Bags, Batteries, Sponges
-  Paper & Laundry → Paper Towels, Toilet Paper, Laundry Pods, Dryer Sheets
-  Health & Beauty → Shampoo, Lotion, Toothpaste, Razors, Face Wash, Deodorant
-  Vitamins & Supplements → Vitamin D, Fish Oil, Protein Powder, Melatonin, Collagen
-  Baby → Diapers, Baby Wipes, Formula, Baby Food, Baby Lotion
-  Clothing & Apparel → T-Shirt, Jeans, Socks, Jacket, Kids Clothing, Shoes
-  Electronics & Office → Headphones, USB Cable, TV, Printer Ink, Keyboard, Mouse
-  Garden & Outdoor → Potting Soil, Plant, Garden Tools, Outdoor Furniture
-  Auto & Hardware → Car Mat, Windshield Washer, Motor Oil, Power Strip
-  Tax → Tax
-  Refund → Refund
-  Other → Other
+- Categories: {category_list}
 {count_note}
 
-TARGET / WALMART RECEIPT FORMAT:
-Target and Walmart print a DEPARTMENT HEADER line (e.g. "APPAREL", "HEALTH AND BEAUTY", "HOME")
-above each item. These headers are NOT items — ignore them.
-The actual item line is the next line with a barcode number, item name, tax marker (T/N/N+), and price.
-Example Target receipt section:
-  APPAREL                          ← department header, IGNORE
-  330030494 MARIO TEE SH   T $5.60  ← this is the item: name="MARIO TEE SH", taxable=true, price=5.60
-  Regular Price $8.00              ← original price note, IGNORE
-  HEALTH AND BEAUTY                ← department header, IGNORE
-  007080144 DESITIN        N+ $6.99 ← item: name="DESITIN", taxable=false, price=6.99
-Tax line format: "T = TX TAX 8.2500 on $3.60  $0.71" → tax = 0.71 (the LAST number, not the rate or taxable amount)
-
-REFUND RECEIPTS (shows "APPROVED - REFUND" or negative TOTAL):
-- subtotal, tax, total must ALL be NEGATIVE (e.g. -69.46, -3.95, -73.41)
-- Every item price must be NEGATIVE (e.g. 34.99- on receipt → price: -34.99)
-- Discount lines on refund receipts: amount stays POSITIVE
-
-Return ONLY this JSON (no markdown, no explanation):
+Return ONLY this JSON schema:
 {{
-  "store":"Target","receipt_date":"2026-02-24",
-  "subtotal":15.59,"tax":0.71,"total":16.30,
+  "store":"Costco","receipt_date":"2025-11-13",
+  "subtotal":0.0,"tax":0.0,"total":0.0,
   "lines":[
-    {{"type":"item","name":"MARIO TEE SH","category":"Clothing & Apparel","sub_category":"T-Shirt","price":5.60,"taxable":true}},
-    {{"type":"item","name":"DESITIN","category":"Baby","sub_category":"Baby Cream","price":6.99,"taxable":false}},
-    {{"type":"item","name":"No Brand","category":"Household & Cleaning","sub_category":"Home Goods","price":3.00,"taxable":true}}
+    {{"type":"item","name":"","category":"Other","price":0.0,"taxable":false}},
+    {{"type":"discount","amount":0.0,"raw":"4.00-"}}
   ]
 }}
 {receipt_block}
@@ -655,16 +610,14 @@ def build_items_from_lines(parsed_data: dict) -> list[dict]:
             if is_refund and bp > 0:
                 bp = -bp
             default_cat = "Refund" if is_refund else (str(ln.get("category", "Other")).strip() or "Other")
-            ai_sub = str(ln.get("sub_category") or "").strip()
             items_out.append({
-                "name":         str(ln.get("name", "")).strip(),
-                "category":     default_cat,
-                "sub_category": ai_sub,
-                "base_price":   round(bp, 2),
-                "discount":     0.0,
-                "price":        round(bp, 2),
-                "taxable":      bool(ln.get("taxable")),
-                "item_tax":     0.0,
+                "name":       str(ln.get("name", "")).strip(),
+                "category":   default_cat,
+                "base_price": round(bp, 2),
+                "discount":   0.0,
+                "price":      round(bp, 2),
+                "taxable":    bool(ln.get("taxable")),
+                "item_tax":   0.0,
             })
             last_idx = len(items_out) - 1
         elif t == "discount" and store == "costco" and last_idx is not None:
@@ -743,8 +696,8 @@ def compute_tax(parsed_data: dict, items: list[dict]) -> tuple[dict, list[dict]]
 def add_tax_row(df: pd.DataFrame, tax: float) -> pd.DataFrame:
     if tax != 0:
         label = "Tax Refund" if tax < 0 else "Sales Tax"
-        row = pd.DataFrame([{"name": label, "category":"Tax","sub_category":"",
-                             "base_price":0.0,"discount":0.0,"price":float(tax),"taxable":False,"item_tax":0.0}])
+        row = pd.DataFrame([{"name": label, "category":"Tax","base_price":0.0,
+                             "discount":0.0,"price":float(tax),"taxable":False,"item_tax":0.0}])
         return pd.concat([df, row], ignore_index=True)
     return df
 
@@ -764,8 +717,7 @@ def apply_category_memory(items: list[dict]) -> list[dict]:
     for item in items:
         key = str(item.get("name", "")).strip().lower()
         if key in mapping:
-            item["category"]     = mapping[key]["category"]
-            item["sub_category"] = mapping[key]["sub_category"]
+            item["category"] = mapping[key]
             hits += 1
     if hits:
         st.info(f"Category memory applied to {hits} item(s).")
@@ -844,7 +796,6 @@ def save_to_database(items_df: pd.DataFrame, receipt_date: date):
                 receipt_id=receipt.id, date=receipt_date,
                 name=str(row.get("name", "")).strip(),
                 category=str(row.get("category", "Other")).strip() or "Other",
-                sub_category=str(row.get("sub_category", "")).strip() or None,
                 price=float(row["price"]),
             ))
         session.commit()
@@ -1181,14 +1132,13 @@ if (st.session_state.parsed_data is not None
     edited_df = st.data_editor(
         st.session_state.df_to_save, num_rows="dynamic",
         column_config={
-            "name":         st.column_config.TextColumn("Item",         required=True),
-            "category":     st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
-            "sub_category": st.column_config.TextColumn("Sub-category"),
-            "base_price":   st.column_config.NumberColumn("Base $",     format="$%.2f"),
-            "discount":     st.column_config.NumberColumn("Discount",   format="$%.2f"),
-            "price":        st.column_config.NumberColumn("Net $",      required=True, format="$%.2f"),
-            "taxable":      st.column_config.CheckboxColumn("Taxable"),
-            "item_tax":     st.column_config.NumberColumn("Item Tax",   format="$%.2f"),
+            "name":       st.column_config.TextColumn("Item",       required=True),
+            "category":   st.column_config.TextColumn("Category",   required=True),
+            "base_price": st.column_config.NumberColumn("Base $",   format="$%.2f"),
+            "discount":   st.column_config.NumberColumn("Discount", format="$%.2f"),
+            "price":      st.column_config.NumberColumn("Net $",    required=True, format="$%.2f"),
+            "taxable":    st.column_config.CheckboxColumn("Taxable"),
+            "item_tax":   st.column_config.NumberColumn("Item Tax", format="$%.2f"),
         },
         key="receipt_editor",
     )
@@ -1240,8 +1190,8 @@ if inspect(engine).has_table("receipt_items"):
         st.markdown("---")
 
         # ---- Tabs ----
-        tab_overview, tab_category, tab_monthly, tab_store, tab_items, tab_api = st.tabs([
-            "📈 Overview", "🗂 Categories", "📅 Monthly", "🏪 By Store", "🔍 Drill Down", "⚙️ API Log"
+        tab_overview, tab_category, tab_monthly, tab_items, tab_api = st.tabs([
+            "📈 Overview", "🗂 Categories", "📅 Monthly", "🔍 Drill Down", "⚙️ API Log"
         ])
 
         items_no_tax = items[items["category"].str.lower() != "tax"].copy()
@@ -1257,18 +1207,13 @@ if inspect(engine).has_table("receipt_items"):
                 title="Spend by Category", text="price",
                 color="price", color_continuous_scale="Blues",
             )
-            fig_cat.update_traces(
-                texttemplate="$%{text:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
+            fig_cat.update_traces(texttemplate="$%{text:,.2f}", textposition="outside")
             fig_cat.update_layout(
-                yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
+                yaxis=dict(categoryorder="total ascending"), xaxis_title="Amount ($)", yaxis_title="",
                 coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=10, r=140, t=40, b=10), font=dict(size=13),
-                uniformtext=dict(mode="hide", minsize=10),
-                xaxis=dict(showticklabels=False, showgrid=False),
+                margin=dict(l=10, r=80, t=40, b=10), font=dict(size=13),
             )
+            fig_cat.update_xaxes(showgrid=True, gridcolor="#f0f0f0")
             col1.plotly_chart(fig_cat, width="stretch")
 
             fig_pie = px.pie(
@@ -1314,23 +1259,17 @@ if inspect(engine).has_table("receipt_items"):
                 title=f"Top items in {selected_cat}", text="price",
                 color="price", color_continuous_scale="Teal",
             )
-            fig_items.update_traces(
-                texttemplate="$%{text:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
+            fig_items.update_traces(texttemplate="$%{text:,.2f}", textposition="outside")
             fig_items.update_layout(
-                yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
+                yaxis=dict(categoryorder="total ascending"), xaxis_title="Total Spent ($)", yaxis_title="",
                 coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=10, r=140, t=40, b=10), font=dict(size=13),
-                uniformtext=dict(mode="hide", minsize=10),
-                xaxis=dict(showticklabels=False, showgrid=False),
+                margin=dict(l=10, r=80, t=40, b=10), font=dict(size=13),
             )
             st.plotly_chart(fig_items, width="stretch")
 
             # Editable table with inline recategorize
             st.markdown("**Recategorize items — edit the Category column then click Save Changes**")
-            edit_cat_df = cat_items[["id", "name", "category", "sub_category", "price", "date"]].copy() if "sub_category" in cat_items.columns else cat_items[["id", "name", "category", "price", "date"]].copy()
+            edit_cat_df = cat_items[["id", "name", "category", "price", "date"]].copy()
             edit_cat_df["date"] = edit_cat_df["date"].dt.date
 
             edited_cat = st.data_editor(
@@ -1389,17 +1328,11 @@ if inspect(engine).has_table("receipt_items"):
                 title=f"Category breakdown — {sel_month}", text="price",
                 color="price", color_continuous_scale="Purples",
             )
-            fig_mcat.update_traces(
-                texttemplate="$%{text:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
+            fig_mcat.update_traces(texttemplate="$%{text:,.2f}", textposition="outside")
             fig_mcat.update_layout(
-                yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
+                yaxis=dict(categoryorder="total ascending"), xaxis_title="Amount ($)", yaxis_title="",
                 coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=10, r=140, t=40, b=10), font=dict(size=13),
-                uniformtext=dict(mode="hide", minsize=10),
-                xaxis=dict(showticklabels=False, showgrid=False),
+                margin=dict(l=10, r=80, t=40, b=10), font=dict(size=13),
             )
             st.plotly_chart(fig_mcat, width="stretch")
 
@@ -1409,98 +1342,6 @@ if inspect(engine).has_table("receipt_items"):
                     .style.format({"price": "${:,.2f}"}),
                 width="stretch",
             )
-
-        # ==================== BY STORE ====================
-        with tab_store:
-            # Merge items with receipts to get store name
-            if "receipt_id" in items_no_tax.columns and not receipts.empty:
-                receipts_slim = receipts[["id","store"]].rename(columns={"id":"receipt_id"})
-                items_with_store = items_no_tax.merge(receipts_slim, on="receipt_id", how="left")
-            else:
-                items_with_store = items_no_tax.copy()
-                items_with_store["store"] = "Unknown"
-
-            # KPIs per store
-            store_summary = (
-                items_with_store.groupby("store")["price"]
-                .agg(total="sum", visits=lambda x: x.index.nunique())
-                .reset_index()
-                .sort_values("total", ascending=False)
-            )
-            # Fix visits to be receipt count not item count
-            receipt_counts = items_with_store.groupby("store")["receipt_id"].nunique().reset_index()
-            receipt_counts.columns = ["store","receipts"]
-            store_summary = store_summary.merge(receipt_counts, on="store")
-            store_summary = store_summary[["store","total","receipts"]].sort_values("total", ascending=False)
-
-            # Bar chart
-            fig_store = px.bar(
-                store_summary, x="total", y="store", orientation="h",
-                title="Total Spend by Store", text="total",
-                color="total", color_continuous_scale="Teal",
-            )
-            fig_store.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", cliponaxis=False)
-            fig_store.update_layout(
-                yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
-                coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=10, r=140, t=40, b=10), font=dict(size=13),
-                uniformtext=dict(mode="hide", minsize=10),
-                xaxis=dict(showticklabels=False, showgrid=False),
-            )
-            st.plotly_chart(fig_store, width="stretch")
-
-            # Summary table
-            st.dataframe(
-                store_summary.style.format({"total": "${:,.2f}"}),
-                hide_index=True, width="stretch",
-            )
-
-            st.markdown("---")
-
-            # Drill into a specific store
-            stores = sorted(items_with_store["store"].unique().tolist())
-            sel_store = st.selectbox("Drill into store", stores)
-            store_items = items_with_store[items_with_store["store"] == sel_store]
-
-            sc1, sc2 = st.columns(2)
-            sc1.metric("Total", f"${store_items['price'].sum():,.2f}")
-            sc2.metric("Receipts", store_items["receipt_id"].nunique())
-
-            # Category breakdown for this store
-            store_cat = store_items.groupby("category")["price"].sum().sort_values(ascending=False)
-            fig_sc = px.bar(
-                store_cat.reset_index(), x="price", y="category", orientation="h",
-                title=f"Category breakdown — {sel_store}", text="price",
-                color="price", color_continuous_scale="Oranges",
-            )
-            fig_sc.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", cliponaxis=False)
-            fig_sc.update_layout(
-                yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
-                coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=10, r=140, t=40, b=10), font=dict(size=13),
-                uniformtext=dict(mode="hide", minsize=10),
-                xaxis=dict(showticklabels=False, showgrid=False),
-            )
-            st.plotly_chart(fig_sc, width="stretch")
-
-            # Monthly spend for this store
-            store_monthly = store_items.groupby("month_label")["price"].sum().reset_index().sort_values("month_label")
-            if not store_monthly.empty:
-                fig_sm = px.bar(
-                    store_monthly, x="month_label", y="price",
-                    title=f"Monthly spend — {sel_store}", text="price",
-                    color="price", color_continuous_scale="Oranges",
-                    category_orders={"month_label": sorted(store_monthly["month_label"].tolist())},
-                )
-                fig_sm.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", cliponaxis=False)
-                fig_sm.update_layout(
-                    xaxis=dict(type="category", title="Month"), yaxis_title="Amount ($)",
-                    coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                    margin=dict(l=10, r=10, t=40, b=10), font=dict(size=13), bargap=0.3,
-                )
-                fig_sm.update_xaxes(showgrid=False)
-                fig_sm.update_yaxes(showgrid=True, gridcolor="#f0f0f0")
-                st.plotly_chart(fig_sm, width="stretch")
 
         # ==================== DRILL DOWN ====================
         with tab_items:
