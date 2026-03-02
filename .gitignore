@@ -1,0 +1,12 @@
+# Ignore environment variables
+.env
+.streamlit/
+
+# Ignore SQLite database file
+*.db 
+
+
+# Ignore Python environment files
+__pycache__/
+.venv/
+ven
