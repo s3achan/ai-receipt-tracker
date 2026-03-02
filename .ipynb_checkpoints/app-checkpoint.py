@@ -339,19 +339,36 @@ def load_dynamic_categories():
         session.close()
 
 def get_item_category_mapping() -> dict:
-    """Returns {item_name_lower: {"category": ..., "sub_category": ...}}"""
+    """
+    Returns {item_name_lower: {"category": ..., "sub_category": ...}}
+    Uses the most frequently saved category+sub_category pair for each item name.
+    This means if a user has corrected an item 3 times, that correction wins
+    over any one-off AI assignment.
+    """
     session = SessionLocal()
     mapping: dict = {}
     try:
         if inspect(engine).has_table("receipt_items"):
             rows = (
-                session.query(ReceiptItem.name, ReceiptItem.category, ReceiptItem.sub_category, Receipt.date)
-                .join(Receipt).order_by(Receipt.date.desc()).all()
+                session.query(ReceiptItem.name, ReceiptItem.category, ReceiptItem.sub_category)
+                .all()
             )
-            for name, category, sub_category, _ in rows:
+            # Count occurrences of (name, category, sub_category) combos
+            from collections import Counter
+            counts: dict = {}  # key -> Counter of (category, sub_category)
+            for name, category, sub_category in rows:
                 key = str(name).strip().lower()
-                if key and key not in mapping:
-                    mapping[key] = {"category": category, "sub_category": sub_category or ""}
+                if not key:
+                    continue
+                if key not in counts:
+                    counts[key] = Counter()
+                counts[key][(category or "Other", sub_category or "")] += 1
+
+            # Pick the most common (category, sub_category) per item
+            for key, counter in counts.items():
+                best_cat, best_sub = counter.most_common(1)[0][0]
+                mapping[key] = {"category": best_cat, "sub_category": best_sub}
+
     except Exception as e:
         logger.warning("get_item_category_mapping: %s", e)
     finally:
@@ -757,6 +774,13 @@ def split_subtotal_tax(df: pd.DataFrame) -> tuple[float, float, float]:
     return subtotal, tax, subtotal + tax
 
 def apply_category_memory(items: list[dict]) -> list[dict]:
+    """
+    For each item, if we've seen it before, use the historically most-used
+    category + sub_category (user corrections accumulate weight over time).
+    Only overrides AI suggestion if a history match exists.
+    Sub_category: if history has a non-empty sub_category, use it.
+    If history sub_category is empty but AI gave one, keep AI's.
+    """
     mapping = get_item_category_mapping()
     if not mapping:
         return items
@@ -764,11 +788,14 @@ def apply_category_memory(items: list[dict]) -> list[dict]:
     for item in items:
         key = str(item.get("name", "")).strip().lower()
         if key in mapping:
-            item["category"]     = mapping[key]["category"]
-            item["sub_category"] = mapping[key]["sub_category"]
+            hist = mapping[key]
+            item["category"] = hist["category"]
+            # Only override sub_category with history if history has a value
+            if hist["sub_category"]:
+                item["sub_category"] = hist["sub_category"]
             hits += 1
     if hits:
-        st.info(f"Category memory applied to {hits} item(s).")
+        st.info(f"✅ Category memory applied to {hits} item(s) from history.")
     return items
 
 # ===================== ANALYTICS LOADER =====================
