@@ -49,8 +49,26 @@ MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
 INITIAL_CATEGORIES = [
-    "Meat & Prepared Foods", "Produce", "Dairy & Eggs", "Beverages",
-    "Frozen & Packaged Foods", "Baby", "Household", "Clothing", "Tax", "Other",
+    "Meat & Seafood",
+    "Produce",
+    "Dairy & Eggs",
+    "Bakery & Bread",
+    "Frozen Foods",
+    "Pantry & Dry Goods",
+    "Snacks & Candy",
+    "Beverages & Coffee",
+    "Household & Cleaning",
+    "Paper & Laundry",
+    "Health & Beauty",
+    "Vitamins & Supplements",
+    "Baby",
+    "Clothing & Apparel",
+    "Electronics & Office",
+    "Garden & Outdoor",
+    "Auto & Hardware",
+    "Tax",
+    "Refund",
+    "Other",
 ]
 CATEGORIES = list(INITIAL_CATEGORIES)
 
@@ -572,8 +590,15 @@ def extract_date_via_vision(pdf_bytes: bytes) -> Optional[str]:
         return None
 
 # ===================== COSTCO DISCOUNT + TAX =====================
+def is_refund_receipt(parsed_data: dict) -> bool:
+    """Returns True if the receipt total is negative (refund)."""
+    total = float(parsed_data.get("total") or 0)
+    subtotal = float(parsed_data.get("subtotal") or 0)
+    return total < 0 or subtotal < 0
+
 def build_items_from_lines(parsed_data: dict) -> list[dict]:
-    store   = parsed_data.get("store", "").strip().lower()
+    store      = parsed_data.get("store", "").strip().lower()
+    is_refund  = is_refund_receipt(parsed_data)
     items_out: list[dict] = []
     last_idx = None
 
@@ -581,9 +606,13 @@ def build_items_from_lines(parsed_data: dict) -> list[dict]:
         t = str(ln.get("type", "")).strip().lower()
         if t == "item":
             bp = float(ln.get("price") or 0)
+            # For refund receipts, prices should be negative
+            if is_refund and bp > 0:
+                bp = -bp
+            default_cat = "Refund" if is_refund else (str(ln.get("category", "Other")).strip() or "Other")
             items_out.append({
                 "name":       str(ln.get("name", "")).strip(),
-                "category":   str(ln.get("category", "Other")).strip() or "Other",
+                "category":   default_cat,
                 "base_price": round(bp, 2),
                 "discount":   0.0,
                 "price":      round(bp, 2),
@@ -665,8 +694,9 @@ def compute_tax(parsed_data: dict, items: list[dict]) -> tuple[dict, list[dict]]
     parsed_data["tax"] = round(receipt_tax, 2)
     return parsed_data, items
 def add_tax_row(df: pd.DataFrame, tax: float) -> pd.DataFrame:
-    if tax > 0:
-        row = pd.DataFrame([{"name":"Sales Tax","category":"Tax","base_price":0.0,
+    if tax != 0:
+        label = "Tax Refund" if tax < 0 else "Sales Tax"
+        row = pd.DataFrame([{"name": label, "category":"Tax","base_price":0.0,
                              "discount":0.0,"price":float(tax),"taxable":False,"item_tax":0.0}])
         return pd.concat([df, row], ignore_index=True)
     return df
@@ -700,6 +730,15 @@ def load_analytics():
     receipts = pd.read_sql_table("receipts", engine)
     return items, receipts
 
+# ===================== SIDEBAR DATA LOADERS =====================
+@st.cache_data(ttl=30)
+def load_sidebar_receipts():
+    return pd.read_sql_table("receipts", engine, columns=["id","store","date","total"])
+
+@st.cache_data(ttl=30)
+def load_sidebar_items():
+    return pd.read_sql_table("receipt_items", engine, columns=["id","name","category"])
+
 # ===================== DB HELPERS =====================
 def upload_to_s3(receipt_date: date) -> Optional[str]:
     raw_bytes  = st.session_state.get("raw_receipt_bytes")
@@ -732,7 +771,7 @@ def save_to_database(items_df: pd.DataFrame, receipt_date: date):
     items_df = items_df.copy()
     items_df["price"] = pd.to_numeric(items_df["price"], errors="coerce")
     items_df = items_df.dropna(subset=["price"])
-    items_df = items_df[items_df["price"] >= 0]
+    # Allow negative prices — refund receipts have negative line items
 
     # Validate totals
     subtotal, tax, total = split_subtotal_tax(items_df)
@@ -767,6 +806,8 @@ def save_to_database(items_df: pd.DataFrame, receipt_date: date):
         load_dynamic_categories()
         get_monthly_cost.clear()
         load_analytics.clear()
+        load_sidebar_receipts.clear()
+        load_sidebar_items.clear()
         st.rerun()
     except Exception as e:
         session.rollback()
@@ -786,6 +827,8 @@ def delete_receipt(receipt_id: int):
             load_dynamic_categories()
             load_analytics.clear()
             get_monthly_cost.clear()
+            load_sidebar_receipts.clear()
+            load_sidebar_items.clear()
             st.sidebar.success(f"Receipt #{receipt_id} deleted.")
             st.rerun()
         else:
@@ -806,6 +849,8 @@ def delete_all_data():
         load_dynamic_categories()
         load_analytics.clear()
         get_monthly_cost.clear()
+        load_sidebar_receipts.clear()
+        load_sidebar_items.clear()
         st.sidebar.success("All data deleted.")
         st.rerun()
     except Exception as e:
@@ -847,6 +892,8 @@ def update_item_category(item_id: int, new_category: str):
         session.commit()
         st.sidebar.success(f"Item #{item_id} → {cleaned}")
         load_dynamic_categories()
+        load_sidebar_items.clear()
+        load_analytics.clear()
         st.rerun()
     except Exception as e:
         session.rollback()
@@ -970,7 +1017,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("Data Management")
 
 if inspect(engine).has_table("receipts"):
-    receipts_df = pd.read_sql_table("receipts", engine, columns=["id","store","date","total"])
+    receipts_df = load_sidebar_receipts()
     if not receipts_df.empty:
         receipts_df["date"]  = pd.to_datetime(receipts_df["date"]).dt.date
         receipts_df["label"] = (
@@ -1014,8 +1061,7 @@ if inspect(engine).has_table("receipts"):
 
     st.sidebar.markdown("---")
     if inspect(engine).has_table("receipt_items"):
-        items_sidebar = pd.read_sql_table("receipt_items", engine,
-                                          columns=["id","name","category"])
+        items_sidebar = load_sidebar_items()
         if not items_sidebar.empty:
             items_sidebar["label"] = (
                 "Item " + items_sidebar["id"].astype(str) + " | " +
@@ -1066,10 +1112,13 @@ if (st.session_state.parsed_data is not None
     st.markdown("---")
     st.subheader("Review & Edit")
 
+    if is_refund_receipt(st.session_state.parsed_data):
+        st.warning("↩️ **Refund receipt detected.** Items will be saved with negative prices and categorized as *Refund*. Edit categories if needed before saving.")
+
     df = st.session_state.df_to_save.copy()
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df = df.dropna(subset=["price"])
-    df = df[df["price"] >= 0]
+    # Allow negative prices for refunds
     st.session_state.df_to_save = df
 
     try:
