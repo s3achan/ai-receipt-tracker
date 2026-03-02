@@ -5,6 +5,12 @@ AI Class Receipt is an end-to-end AI-powered system that extracts, classifies, a
 
 This project combines OCR, LLM-based classification, structured data modeling, and interactive dashboards to transform unstructured receipts into actionable financial intelligence.
 
+## 🌐 Live Demo
+
+🚀 **Try the App Here:**  
+👉 [Launch AI Class Receipt](https://receipt-iq.streamlit.app/)
+> Upload a receipt (PDF or image) and see AI automatically extract, classify, and store structured transaction data in real time.
+
 ## Application Overeiw 
 
 ![Spending Tracker Dashboard](assets/snapshot.png)
