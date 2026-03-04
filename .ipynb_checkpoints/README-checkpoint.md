@@ -8,7 +8,7 @@ This project combines OCR, LLM-based classification, structured data modeling, a
 ## 🌐 Live Demo
 
 🚀 **Try the App Here:**  
-👉 [Launch AI Class Receipt](https://receipt-iq.streamlit.app/)
+👉 [Launch AI Class Receipt](https://ledgerlens-ai.streamlit.app/)
 > Upload a receipt (PDF or image) and see AI automatically extract, classify, and store structured transaction data in real time.
 
 ## Application Overeiw 
