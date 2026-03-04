@@ -4,7 +4,13 @@ An AI-powered receipt parsing and spending analytics app built with Streamlit, O
 
 ---
 
-## Application Overeiw 
+## 🌐 Live Demo
+
+🚀 **Try the App Here:**  
+👉 [Launch AI Class Receipt](https://ledgerlens-ai.streamlit.app/)
+> Upload a receipt (PDF or image) and see AI automatically extract, classify, and store structured transaction data in real time.
+
+## Application Overview 
 
 ![Spending Tracker Dashboard](assets/snapshot.png)
 
