@@ -4,7 +4,9 @@ An AI-powered receipt parsing and spending analytics app built with Streamlit, O
 
 ---
 
-## Features
+## Application Overeiw 
+
+![Spending Tracker Dashboard](assets/snapshot.png)
 
 ### 📤 Receipt Parsing
 - Upload receipts as **PDF or image** (PNG, JPG, JPEG) up to 10 MB
