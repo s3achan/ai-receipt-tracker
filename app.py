@@ -49,7 +49,7 @@ MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
 # ===================== DEMO MODE =====================
-DEMO_MODE = True # Set to True to disable write operations (for public demos)
+DEMO_MODE = True  
 
 INITIAL_CATEGORIES = [
     "Meat & Seafood",
@@ -1225,20 +1225,29 @@ if (st.session_state.parsed_data is not None
     if "sub_category" not in display_df.columns:
         display_df["sub_category"] = ""
 
-    edited_df = st.data_editor(
-        display_df, num_rows="dynamic",
-        column_config={
-            "name":         st.column_config.TextColumn("Item",         required=True),
-            "category":     st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
-            "sub_category": st.column_config.TextColumn("Sub-category"),
-            "base_price":   st.column_config.NumberColumn("Base $",     format="$%.2f"),
-            "discount":     st.column_config.NumberColumn("Discount $", format="$%.2f"),
-            "item_tax":     st.column_config.NumberColumn("Tax $",      format="$%.2f"),
-            "price":        st.column_config.NumberColumn("Net $",      required=True, format="$%.2f"),
-            "taxable":      st.column_config.CheckboxColumn("Taxable"),
-        },
-        key="receipt_editor",
-    )
+    if DEMO_MODE:
+        edited_df = display_df  # read-only in demo mode
+        st.dataframe(
+            display_df[["name","category","sub_category","base_price","discount","item_tax","price"]].style.format({
+                "base_price": "${:,.2f}", "discount": "${:,.2f}", "item_tax": "${:,.2f}", "price": "${:,.2f}"
+            }),
+            width="stretch",
+        )
+    else:
+        edited_df = st.data_editor(
+            display_df, num_rows="dynamic",
+            column_config={
+                "name":         st.column_config.TextColumn("Item",         required=True),
+                "category":     st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
+                "sub_category": st.column_config.TextColumn("Sub-category"),
+                "base_price":   st.column_config.NumberColumn("Base $",     format="$%.2f"),
+                "discount":     st.column_config.NumberColumn("Discount $", format="$%.2f"),
+                "item_tax":     st.column_config.NumberColumn("Tax $",      format="$%.2f"),
+                "price":        st.column_config.NumberColumn("Net $",      required=True, format="$%.2f"),
+                "taxable":      st.column_config.CheckboxColumn("Taxable"),
+            },
+            key="receipt_editor",
+        )
     st.session_state.df_to_save = edited_df
 
     sub, tax, total = split_subtotal_tax(edited_df)
@@ -1388,46 +1397,53 @@ if inspect(engine).has_table("receipt_items"):
             st.plotly_chart(fig_items, use_container_width=True)
 
             # Editable table with inline recategorize
-            st.markdown("**Recategorize items — edit the Category column then click Save Changes**")
-            edit_cat_df = cat_items[["id", "name", "category", "price", "date"]].copy()
-            edit_cat_df["date"] = edit_cat_df["date"].dt.date
+            if DEMO_MODE:
+                st.caption("🔒 *Recategorization is disabled in demo mode.*")
+                st.dataframe(
+                    cat_items[["name","category","price"]].style.format({"price": "${:,.2f}"}),
+                    width="stretch",
+                )
+            else:
+                st.markdown("**Recategorize items — edit the Category column then click Save Changes**")
+                edit_cat_df = cat_items[["id", "name", "category", "price", "date"]].copy()
+                edit_cat_df["date"] = edit_cat_df["date"].dt.date
 
-            edited_cat = st.data_editor(
-                edit_cat_df,
-                column_config={
-                    "id":       st.column_config.NumberColumn("ID",    disabled=True),
-                    "name":     st.column_config.TextColumn("Item",    disabled=True),
-                    "date":     st.column_config.DateColumn("Date",    disabled=True),
-                    "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
-                    "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
-                },
-                hide_index=True,
-                num_rows="fixed",
-                key=f"cat_editor_{selected_cat}",
-                width="stretch",
-            )
+                edited_cat = st.data_editor(
+                    edit_cat_df,
+                    column_config={
+                        "id":       st.column_config.NumberColumn("ID",    disabled=True),
+                        "name":     st.column_config.TextColumn("Item",    disabled=True),
+                        "date":     st.column_config.DateColumn("Date",    disabled=True),
+                        "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
+                        "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
+                    },
+                    hide_index=True,
+                    num_rows="fixed",
+                    key=f"cat_editor_{selected_cat}",
+                    width="stretch",
+                )
 
-            if st.button("💾 Save Category Changes", type="primary"):
-                changed = edited_cat[edited_cat["category"] != cat_items["category"].values]
-                if changed.empty:
-                    st.info("No changes detected.")
-                else:
-                    session = SessionLocal()
-                    try:
-                        for _, row in changed.iterrows():
-                            item = session.get(ReceiptItem, int(row["id"]))
-                            if item:
-                                item.category = row["category"]
-                        session.commit()
-                        load_dynamic_categories()
-                        load_analytics.clear()
-                        st.success(f"Updated {len(changed)} item(s).")
-                        st.rerun()
-                    except Exception as e:
-                        session.rollback()
-                        st.error(f"Save failed: {e}")
-                    finally:
-                        session.close()
+                if st.button("💾 Save Category Changes", type="primary"):
+                    changed = edited_cat[edited_cat["category"] != cat_items["category"].values]
+                    if changed.empty:
+                        st.info("No changes detected.")
+                    else:
+                        session = SessionLocal()
+                        try:
+                            for _, row in changed.iterrows():
+                                item = session.get(ReceiptItem, int(row["id"]))
+                                if item:
+                                    item.category = row["category"]
+                            session.commit()
+                            load_dynamic_categories()
+                            load_analytics.clear()
+                            st.success(f"Updated {len(changed)} item(s).")
+                            st.rerun()
+                        except Exception as e:
+                            session.rollback()
+                            st.error(f"Save failed: {e}")
+                        finally:
+                            session.close()
 
         # ==================== MONTHLY ====================
         with tab_monthly:
@@ -1559,45 +1575,52 @@ if inspect(engine).has_table("receipt_items"):
 
             st.caption(f"{len(drill_df)} items found | Total: ${drill_df['price'].sum():,.2f}")
 
-            edited_drill = st.data_editor(
-                drill_df,
-                column_config={
-                    "id":       st.column_config.NumberColumn("ID",    disabled=True),
-                    "name":     st.column_config.TextColumn("Item",    disabled=True),
-                    "date":     st.column_config.DateColumn("Date",    disabled=True),
-                    "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
-                    "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
-                },
-                hide_index=True,
-                num_rows="fixed",
-                key="drill_editor",
-                width="stretch",
-            )
+            if DEMO_MODE:
+                st.caption("🔒 *Recategorization is disabled in demo mode.*")
+                st.dataframe(
+                    drill_df[["name","category","price","date"]].style.format({"price": "${:,.2f}"}),
+                    width="stretch",
+                )
+            else:
+                edited_drill = st.data_editor(
+                    drill_df,
+                    column_config={
+                        "id":       st.column_config.NumberColumn("ID",    disabled=True),
+                        "name":     st.column_config.TextColumn("Item",    disabled=True),
+                        "date":     st.column_config.DateColumn("Date",    disabled=True),
+                        "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
+                        "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
+                    },
+                    hide_index=True,
+                    num_rows="fixed",
+                    key="drill_editor",
+                    width="stretch",
+                )
 
-            if st.button("💾 Save Changes", type="primary", key="drill_save"):
-                original_cats = drill_df.set_index("id")["category"]
-                changed = edited_drill[edited_drill.apply(
-                    lambda r: r["category"] != original_cats.get(r["id"], r["category"]), axis=1
-                )]
-                if changed.empty:
-                    st.info("No changes detected.")
-                else:
-                    session = SessionLocal()
-                    try:
-                        for _, row in changed.iterrows():
-                            item = session.get(ReceiptItem, int(row["id"]))
-                            if item:
-                                item.category = row["category"]
-                        session.commit()
-                        load_dynamic_categories()
-                        load_analytics.clear()
-                        st.success(f"Updated {len(changed)} item(s).")
-                        st.rerun()
-                    except Exception as e:
-                        session.rollback()
-                        st.error(f"Save failed: {e}")
-                    finally:
-                        session.close()
+                if st.button("💾 Save Changes", type="primary", key="drill_save"):
+                    original_cats = drill_df.set_index("id")["category"]
+                    changed = edited_drill[edited_drill.apply(
+                        lambda r: r["category"] != original_cats.get(r["id"], r["category"]), axis=1
+                    )]
+                    if changed.empty:
+                        st.info("No changes detected.")
+                    else:
+                        session = SessionLocal()
+                        try:
+                            for _, row in changed.iterrows():
+                                item = session.get(ReceiptItem, int(row["id"]))
+                                if item:
+                                    item.category = row["category"]
+                            session.commit()
+                            load_dynamic_categories()
+                            load_analytics.clear()
+                            st.success(f"Updated {len(changed)} item(s).")
+                            st.rerun()
+                        except Exception as e:
+                            session.rollback()
+                            st.error(f"Save failed: {e}")
+                        finally:
+                            session.close()
 
         # ==================== API LOG ====================
         with tab_api:
