@@ -49,7 +49,7 @@ MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
 # ===================== DEMO MODE =====================
-DEMO_MODE = False  # Set to False to enable full data management features
+DEMO_MODE = True  # Set to True to disable write operations (for public demos)
 
 INITIAL_CATEGORIES = [
     "Meat & Seafood",
@@ -69,6 +69,7 @@ INITIAL_CATEGORIES = [
     "Electronics & Office",
     "Garden & Outdoor",
     "Auto & Hardware",
+    "Eating Out & Delivery",
     "Tax",
     "Refund",
     "Other",
@@ -184,7 +185,7 @@ def get_engine():
             max_overflow=2,
             pool_timeout=30,
             pool_recycle=1800,
-            pool_pre_ping=True,
+            pool_pre_ping=True,   # helps with dropped connections
             future=True,
         )
 
@@ -195,7 +196,7 @@ engine = get_engine()
 try:
     with engine.connect() as conn:
         conn.execute(text("select 1"))
-    st.sidebar.success("✅ Connected to database")
+    st.sidebar.success("✅ Connected to Supabase")
 except Exception as e:
     st.sidebar.error(f"❌ DB connection failed: {e}")
     st.stop()
@@ -206,6 +207,8 @@ def get_sessionmaker():
 
 SessionLocal = get_sessionmaker()
 
+#SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
 class Receipt(Base):
     __tablename__ = "receipts"
     id:        Mapped[int]            = mapped_column(Integer, primary_key=True)
@@ -215,7 +218,7 @@ class Receipt(Base):
     tax:       Mapped[Optional[float]]= mapped_column(Float)
     total:     Mapped[Optional[float]]= mapped_column(Float)
     pdf_path:  Mapped[Optional[str]]  = mapped_column(String)
-    file_hash: Mapped[Optional[str]]  = mapped_column(String, index=True)
+    file_hash: Mapped[Optional[str]]  = mapped_column(String, index=True)   # duplicate detection
     created_at:Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
     items: Mapped[list["ReceiptItem"]] = relationship(
         "ReceiptItem", back_populates="receipt", cascade="all, delete-orphan"
@@ -245,6 +248,10 @@ class ApiLog(Base):
 Base.metadata.create_all(engine)
 
 def _run_migrations():
+    """
+    Safely add new columns to existing databases that predate the current schema.
+    Handles both SQLite and PostgreSQL.
+    """
     migrations = [
         ("receipts",      "file_hash",    "VARCHAR"),
         ("receipts",      "created_at",   "TIMESTAMP"),
@@ -267,7 +274,7 @@ def _run_migrations():
             except Exception as e:
                 err = str(e).lower()
                 if "duplicate column" in err or "already exists" in err:
-                    pass
+                    pass  # column already exists, safe to ignore
                 else:
                     logger.warning("Migration warning (%s.%s): %s", table, column, e)
 
@@ -275,6 +282,7 @@ _run_migrations()
 
 # ===================== COST TRACKING =====================
 def log_api_call(model: str, usage, purpose: str = ""):
+    """Log token usage and estimated cost to DB."""
     if not usage:
         return
     inp  = getattr(usage, "input_tokens",  0) or 0
@@ -335,14 +343,13 @@ def load_dynamic_categories():
         session.close()
 
 def get_item_category_mapping() -> dict:
+    """Returns {item_name_lower: {"category": ..., "sub_category": ...}}
+    Uses most frequently saved category+sub_category pair per item."""
     session = SessionLocal()
     mapping: dict = {}
     try:
         if inspect(engine).has_table("receipt_items"):
-            rows = (
-                session.query(ReceiptItem.name, ReceiptItem.category, ReceiptItem.sub_category)
-                .all()
-            )
+            rows = session.query(ReceiptItem.name, ReceiptItem.category, ReceiptItem.sub_category).all()
             from collections import Counter
             counts: dict = {}
             for name, category, sub_category in rows:
@@ -352,11 +359,9 @@ def get_item_category_mapping() -> dict:
                 if key not in counts:
                     counts[key] = Counter()
                 counts[key][(category or "Other", sub_category or "")] += 1
-
             for key, counter in counts.items():
                 best_cat, best_sub = counter.most_common(1)[0][0]
                 mapping[key] = {"category": best_cat, "sub_category": best_sub}
-
     except Exception as e:
         logger.warning("get_item_category_mapping: %s", e)
     finally:
@@ -387,6 +392,7 @@ def is_garbled_text(text: str) -> bool:
     return (text.count("(cid:") * 6) / max(len(text), 1) > 0.05
 
 def compress_image(image_bytes: bytes, max_dim: int = 1600, quality: int = 85) -> bytes:
+    """Resize + compress to reduce OpenAI payload size and cost."""
     from PIL import Image as PILImage
     img = PILImage.open(io.BytesIO(image_bytes))
     img.thumbnail((max_dim, max_dim), PILImage.LANCZOS)
@@ -396,6 +402,7 @@ def compress_image(image_bytes: bytes, max_dim: int = 1600, quality: int = 85) -
     return buf.getvalue()
 
 def pdf_to_image_bytes(pdf_bytes: bytes, zoom: float = 2.0) -> tuple[bytes, list[bytes]]:
+    """Returns (stitched_bytes_for_vision, [per_page_bytes_for_display])."""
     import fitz
     from PIL import Image as PILImage
 
@@ -424,6 +431,7 @@ def pdf_to_image_bytes(pdf_bytes: bytes, zoom: float = 2.0) -> tuple[bytes, list
     return buf.getvalue(), page_bytes_list
 
 def extract_date_from_pdf_bytes(pdf_bytes: bytes) -> Optional[str]:
+    """Scan all PDF text layers for a receipt date."""
     DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b")
 
     def _parse(match) -> Optional[str]:
@@ -532,9 +540,10 @@ Fields required:
 - store (string)
 - receipt_date (YYYY-MM-DD):
   * WEB receipt: top-left corner, M/D/YY (e.g. "2/27/26" = 2026-02-27)
-  * IN-STORE receipt: near bottom next to APPROVED, MM/DD/YYYY (e.g. "02/23/2026")
-  Do NOT invent a date.
-- subtotal, tax, total (numbers)
+  * IN-STORE receipt: near bottom next to APPROVED or VISA line, MM/DD/YYYY
+  * HEB: date near bottom near VISA CREDIT line e.g. "RECEIPT EXPIRES ON 04-13-26" means purchase ~30 days earlier
+  Do NOT invent a date. If unsure, omit.
+- subtotal, tax, total (numbers) — if tax is $0.00 on the receipt, set tax: 0 exactly
 - lines: ordered list of ITEM or DISCOUNT lines
 
 ITEM: {{"type":"item","name":"...","category":"...","sub_category":"...","price":0.0,"taxable":false}}
@@ -544,58 +553,64 @@ Rules:
 - TAX MARKERS:
   * Costco: Y → taxable:true, N → taxable:false
   * Target/Walmart: T → taxable:true, N or N+ → taxable:false
+  * HEB: FW = Fresh Weight item, taxable:false. TF = taxable:true
 - Discount line like "/2189436 4.00-" → DISCOUNT type, immediately after that item.
 - Keep item price as BASE price; discounts applied in code.
-- category: pick best fit from this list: {category_list}
-- sub_category: be specific about what the item actually is based on its name.
-  Examples by category:
-  Meat & Seafood → Chicken, Beef, Pork, Salmon, Shrimp, Deli Meat, Turkey
-  Produce → Berries, Apples, Bananas, Salad Mix, Spinach, Broccoli, Avocado
-  Dairy & Eggs → Milk, Shredded Cheese, String Cheese, Greek Yogurt, Butter, Eggs
-  Bakery & Bread → Bread, Muffins, Croissants, Tortillas, Bagels
-  Frozen Foods → Frozen Meals, Frozen Vegetables, Ice Cream, Pizza, Waffles
-  Pantry & Dry Goods → Pasta, Rice, Canned Tomatoes, Olive Oil, Hot Sauce, Spices
-  Snacks & Candy → Chips, Mixed Nuts, Protein Bars, Cookies, Chocolate, Crackers, Trail Mix
-  Beverages & Coffee → Water, Orange Juice, Coffee Pods, Energy Drinks, Sports Drinks, Wine
+- category: pick best fit from: {category_list}
+- sub_category: specific description of the item (e.g. "Chicken Breast", "Paper Towels")
+  Examples:
+  Meat & Seafood → Chicken, Beef, Pork, Salmon, Shrimp, Deli Meat
+  Produce → Berries, Apples, Salad Mix, Spinach, Tomatoes, Green Onion
+  Dairy & Eggs → Milk, Cheese, Greek Yogurt, Butter, Eggs
+  Bakery & Bread → Bread, Muffins, Tortillas, Bagels
+  Frozen Foods → Frozen Meals, Frozen Vegetables, Ice Cream, Pizza
+  Pantry & Dry Goods → Pasta, Rice, Canned Goods, Olive Oil, Hot Sauce, Spices, Mustard
+  Snacks & Candy → Chips, Mixed Nuts, Protein Bars, Cookies, Crackers, Trail Mix
+  Beverages & Coffee → Water, Orange Juice, Coffee Pods, Energy Drinks, Soda, Coconut Water
   Household & Cleaning → Dish Soap, Trash Bags, Ziploc Bags, Batteries, Sponges
   Paper & Laundry → Paper Towels, Toilet Paper, Laundry Pods, Dryer Sheets
   Health & Beauty → Shampoo, Lotion, Toothpaste, Razors, Face Wash, Deodorant
-  Vitamins & Supplements → Vitamin D, Fish Oil, Protein Powder, Melatonin, Collagen
-  Baby → Diapers, Baby Wipes, Formula, Baby Food, Baby Lotion
+  Vitamins & Supplements → Vitamin D, Fish Oil, Protein Powder, Melatonin
+  Baby → Diapers, Baby Wipes, Formula, Baby Food, Baby Lotion, Baby Cream
   Clothing & Apparel → T-Shirt, Jeans, Socks, Jacket, Kids Clothing, Shoes
-  Electronics & Office → Headphones, USB Cable, TV, Printer Ink, Keyboard, Mouse
+  Electronics & Office → Headphones, USB Cable, TV, Printer Ink, Keyboard
   Garden & Outdoor → Potting Soil, Plant, Garden Tools, Outdoor Furniture
   Auto & Hardware → Car Mat, Windshield Washer, Motor Oil, Power Strip
+  Eating Out & Delivery → Restaurant, Fast Food, Uber Eats, DoorDash, Coffee Shop
   Tax → Tax
   Refund → Refund
   Other → Other
 {count_note}
 
+HEB RECEIPT FORMAT:
+Items: line number, name, weight info, final price.
+"FW" = Fresh Weight = taxable:false. "TF" after name = taxable:true.
+The LAST number on each item line is always the final price.
+Examples:
+  1  STRAIGHT LEAF MUSTARD  FW  0.37  → name="STRAIGHT LEAF MUSTARD", price=0.37, taxable=false
+  5  ROMA TOMATOES 1/ 2.48 FW 1.70  → name="ROMA TOMATOES", price=1.70, taxable=false
+  5  GREEN BEANS 1.42 Lbs @ 1/ 1.78 FW 2.53  → name="GREEN BEANS", price=2.53, taxable=false
+  3  LTTL BELLIES ORG STRAWBRY F  TF  5.99  → name="LTTL BELLIES ORG STRAWBRY", price=5.99, taxable=true
+Tax: "Sales Tax  0.49" → tax=0.49
+
 TARGET / WALMART RECEIPT FORMAT:
-Target and Walmart print a DEPARTMENT HEADER line (e.g. "APPAREL", "HEALTH AND BEAUTY", "HOME")
-above each item. These headers are NOT items — ignore them.
-The actual item line is the next line with a barcode number, item name, tax marker (T/N/N+), and price.
-Example Target receipt section:
-  APPAREL                          ← department header, IGNORE
-  330030494 MARIO TEE SH   T $5.60  ← this is the item: name="MARIO TEE SH", taxable=true, price=5.60
-  Regular Price $8.00              ← original price note, IGNORE
-  HEALTH AND BEAUTY                ← department header, IGNORE
-  007080144 DESITIN        N+ $6.99 ← item: name="DESITIN", taxable=false, price=6.99
-Tax line format: "T = TX TAX 8.2500 on $3.60  $0.71" → tax = 0.71 (the LAST number, not the rate or taxable amount)
+Department headers (APPAREL, HEALTH AND BEAUTY, HOME) are NOT items — ignore them.
+Item line: barcode + name + tax marker (T/N/N+) + price
+Tax: "T = TX TAX 8.2500 on $3.60  $0.71" → tax=0.71 (the LAST number only)
 
 REFUND RECEIPTS (shows "APPROVED - REFUND" or negative TOTAL):
-- subtotal, tax, total must ALL be NEGATIVE (e.g. -69.46, -3.95, -73.41)
-- Every item price must be NEGATIVE (e.g. 34.99- on receipt → price: -34.99)
-- Discount lines on refund receipts: amount stays POSITIVE
+- subtotal, tax, total must ALL be NEGATIVE
+- Every item price must be NEGATIVE
+- Discount lines: amount stays POSITIVE
 
 Return ONLY this JSON (no markdown, no explanation):
 {{
-  "store":"Target","receipt_date":"2026-02-24",
-  "subtotal":15.59,"tax":0.71,"total":16.30,
+  "store":"HEB","receipt_date":"2026-03-13",
+  "subtotal":21.56,"tax":0.49,"total":22.05,
   "lines":[
-    {{"type":"item","name":"MARIO TEE SH","category":"Clothing & Apparel","sub_category":"T-Shirt","price":5.60,"taxable":true}},
-    {{"type":"item","name":"DESITIN","category":"Baby","sub_category":"Baby Cream","price":6.99,"taxable":false}},
-    {{"type":"item","name":"No Brand","category":"Household & Cleaning","sub_category":"Home Goods","price":3.00,"taxable":true}}
+    {{"type":"item","name":"STRAIGHT LEAF MUSTARD","category":"Pantry & Dry Goods","sub_category":"Mustard","price":0.37,"taxable":false}},
+    {{"type":"item","name":"ROMA TOMATOES","category":"Produce","sub_category":"Tomatoes","price":1.70,"taxable":false}},
+    {{"type":"discount","amount":3.00,"raw":"3.00-"}}
   ]
 }}
 {receipt_block}
@@ -616,6 +631,7 @@ def parse_receipt_from_image(image_bytes: bytes, mime: str = "image/jpeg") -> di
     return data
 
 def extract_date_via_vision(pdf_bytes: bytes) -> Optional[str]:
+    """Crop top+bottom strips of page 1, ask vision model for date only."""
     try:
         import fitz
         from PIL import Image as PILImage
@@ -637,6 +653,7 @@ def extract_date_via_vision(pdf_bytes: bytes) -> Optional[str]:
 
 # ===================== COSTCO DISCOUNT + TAX =====================
 def is_refund_receipt(parsed_data: dict) -> bool:
+    """Returns True if the receipt total is negative (refund)."""
     total = float(parsed_data.get("total") or 0)
     subtotal = float(parsed_data.get("subtotal") or 0)
     return total < 0 or subtotal < 0
@@ -651,6 +668,7 @@ def build_items_from_lines(parsed_data: dict) -> list[dict]:
         t = str(ln.get("type", "")).strip().lower()
         if t == "item":
             bp = float(ln.get("price") or 0)
+            # For refund receipts, prices should be negative
             if is_refund and bp > 0:
                 bp = -bp
             default_cat = "Refund" if is_refund else (str(ln.get("category", "Other")).strip() or "Other")
@@ -676,20 +694,28 @@ def build_items_from_lines(parsed_data: dict) -> list[dict]:
 
 def _is_costco_store(store_val: str) -> bool:
     s = (store_val or "").strip().lower()
-    return "costco" in s
+    return "costco" in s  # handles "Costco Wholesale", "COSTCO #123", etc.
 
 def compute_tax(parsed_data: dict, items: list[dict]) -> tuple[dict, list[dict]]:
+    """
+    Never ignore tax.
+    - If Costco: distribute tax across taxable items (taxable=True).
+    - Else: distribute tax across all items with price > 0
+            (or across taxable=True items if the model provided taxable flags).
+    """
     store_raw   = parsed_data.get("store", "")
     is_costco   = _is_costco_store(store_raw)
 
     receipt_tax = float(parsed_data.get("tax") or 0)
 
-    if receipt_tax <= 0:
+    # If receipt-level tax is missing, zero, or negligible, skip
+    if receipt_tax < 0.01:
         parsed_data["tax"] = 0.0
         for it in items:
             it["item_tax"] = 0.0
         return parsed_data, items
 
+    # Choose which items get tax allocation
     priced_items = [it for it in items if float(it.get("price") or 0) > 0]
 
     if not priced_items:
@@ -698,10 +724,12 @@ def compute_tax(parsed_data: dict, items: list[dict]) -> tuple[dict, list[dict]]
             it["item_tax"] = 0.0
         return parsed_data, items
 
+    # If Costco: only taxable items. If none marked taxable, fall back to all priced items.
     if is_costco:
         taxable_items = [it for it in priced_items if bool(it.get("taxable"))]
         alloc_items   = taxable_items if taxable_items else priced_items
     else:
+        # For non-Costco: if model provided taxable flags, use them; else tax everything priced.
         has_any_taxable_flag = any("taxable" in it for it in items)
         if has_any_taxable_flag:
             taxable_items = [it for it in priced_items if bool(it.get("taxable"))]
@@ -718,31 +746,35 @@ def compute_tax(parsed_data: dict, items: list[dict]) -> tuple[dict, list[dict]]
 
     tax_rate = receipt_tax / alloc_sum
 
+    # Bake tax directly into each item's price (no separate tax row)
     for it in items:
         it["item_tax"] = 0.0
 
-    for it in alloc_items:
+    allocated = 0.0
+    for i, it in enumerate(alloc_items):
         p = float(it.get("price") or 0)
-        it["item_tax"] = round(p * tax_rate, 2)
+        if i == len(alloc_items) - 1:
+            item_tax = round(receipt_tax - allocated, 2)
+        else:
+            item_tax = round(p * tax_rate, 2)
+        it["item_tax"] = item_tax
+        it["price"]    = round(p + item_tax, 2)
+        allocated     += item_tax
 
     parsed_data["tax"] = round(receipt_tax, 2)
     return parsed_data, items
 
 def add_tax_row(df: pd.DataFrame, tax: float) -> pd.DataFrame:
-    if tax != 0:
-        label = "Tax Refund" if tax < 0 else "Sales Tax"
-        row = pd.DataFrame([{"name": label, "category":"Tax","sub_category":"",
-                             "base_price":0.0,"discount":0.0,"price":float(tax),"taxable":False,"item_tax":0.0}])
-        return pd.concat([df, row], ignore_index=True)
+    """Tax is baked into item prices — no separate tax row needed."""
     return df
 
+
 def split_subtotal_tax(df: pd.DataFrame) -> tuple[float, float, float]:
+    """Tax is baked into item prices. All items count as subtotal."""
     df = df.copy()
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    tax_mask  = df["category"].str.strip().str.lower() == "tax"
-    tax       = float(df.loc[tax_mask,  "price"].sum() or 0)
-    subtotal  = float(df.loc[~tax_mask, "price"].sum() or 0)
-    return subtotal, tax, subtotal + tax
+    total = float(df["price"].sum() or 0)
+    return total, 0.0, total
 
 def apply_category_memory(items: list[dict]) -> list[dict]:
     mapping = get_item_category_mapping()
@@ -761,104 +793,21 @@ def apply_category_memory(items: list[dict]) -> list[dict]:
         st.info(f"✅ Category memory applied to {hits} item(s) from history.")
     return items
 
-# ===================== STYLED TABLE HELPER =====================
-CATEGORY_COLORS = {
-    "Meat & Seafood":         ("#fff0f0", "#c0392b"),
-    "Produce":                ("#f0fff4", "#27ae60"),
-    "Dairy & Eggs":           ("#fffde7", "#f39c12"),
-    "Bakery & Bread":         ("#fff8f0", "#e67e22"),
-    "Frozen Foods":           ("#f0f8ff", "#2980b9"),
-    "Pantry & Dry Goods":     ("#fdf5e6", "#8e6c3e"),
-    "Snacks & Candy":         ("#fef9f0", "#e74c3c"),
-    "Beverages & Coffee":     ("#f0f4ff", "#5b6abf"),
-    "Household & Cleaning":   ("#f5f0ff", "#8e44ad"),
-    "Paper & Laundry":        ("#f0faff", "#16a085"),
-    "Health & Beauty":        ("#fff0f8", "#c0392b"),
-    "Vitamins & Supplements": ("#f0fff8", "#1abc9c"),
-    "Baby":                   ("#fff5fb", "#d35400"),
-    "Clothing & Apparel":     ("#f5f5ff", "#2c3e50"),
-    "Electronics & Office":   ("#f0f5ff", "#2980b9"),
-    "Garden & Outdoor":       ("#f4fff0", "#27ae60"),
-    "Auto & Hardware":        ("#f5f5f5", "#7f8c8d"),
-    "Tax":                    ("#fafafa", "#95a5a6"),
-    "Refund":                 ("#f0fff4", "#27ae60"),
-    "Other":                  ("#f9f9f9", "#95a5a6"),
-    "Groceries":              ("#f0fff4", "#27ae60"),
-}
-
-def build_styled_table(df: pd.DataFrame, columns: list[str], headers: list[str],
-                       price_col: str = "price", show_footer: bool = True) -> str:
-    """
-    Renders a styled HTML table.
-    columns: list of df column names to display
-    headers: matching display header labels
-    price_col: which column holds the numeric price (for colour + footer)
-    """
-    rows_html = ""
-    for _, row in df.iterrows():
-        cells = ""
-        for i, col in enumerate(columns):
-            val = row[col]
-            align = "left"
-            style_extra = ""
-            content = str(val)
-
-            if col == price_col:
-                align = "right"
-                price = float(val)
-                color = "#27ae60" if price >= 0 else "#e74c3c"
-                content = f'<span style="color:{color}; font-weight:700;">${abs(price):,.2f}</span>'
-            elif col == "category":
-                bg, fg = CATEGORY_COLORS.get(str(val), ("#f0f0f0", "#555"))
-                content = f'<span style="background:{bg}; color:{fg}; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:600; white-space:nowrap;">{val}</span>'
-            elif col == "date":
-                content = f'<span style="color:#888; font-size:12px;">{val}</span>'
-            elif col == "total":
-                align = "right"
-                price = float(val)
-                color = "#27ae60" if price >= 0 else "#e74c3c"
-                content = f'<span style="color:{color}; font-weight:700;">${abs(price):,.2f}</span>'
-            elif col == "receipts":
-                align = "right"
-                content = f'<span style="color:#555; font-weight:600;">{int(val)}</span>'
-
-            cell_align = f"text-align:{align};"
-            cells += f'<td style="padding:10px 14px; font-size:14px; {cell_align} border-bottom:1px solid #f0f0f0; color:#1a1a1a;">{content}</td>'
-
-        rows_html += f"<tr>{cells}</tr>"
-
-    header_cells = "".join(
-        f'<th style="padding:11px 14px; text-align:{"right" if h in ("Price","Total","Receipts") else "left"}; font-size:11px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.6px; border-bottom:2px solid #e8e8e8;">{h}</th>'
-        for h in headers
-    )
-
-    footer_html = ""
-    if show_footer and price_col in df.columns:
-        total_val = df[price_col].sum()
-        total_color = "#27ae60" if total_val >= 0 else "#e74c3c"
-        footer_html = f"""
-        <tfoot>
-          <tr style="background:#f8f9fa;">
-            <td colspan="{len(columns)-1}" style="padding:11px 14px; font-size:13px; font-weight:700; color:#555; border-top:2px solid #e8e8e8;">Total ({len(df)} items)</td>
-            <td style="padding:11px 14px; text-align:right; font-size:15px; font-weight:800; color:{total_color}; border-top:2px solid #e8e8e8;">${abs(total_val):,.2f}</td>
-          </tr>
-        </tfoot>"""
-
-    return f"""
-    <div style="border-radius:12px; overflow:hidden; border:1px solid #e8e8e8; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-top:8px;">
-      <table style="width:100%; border-collapse:collapse; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-        <thead><tr style="background:#f8f9fa;">{header_cells}</tr></thead>
-        <tbody>{rows_html}</tbody>
-        {footer_html}
-      </table>
-    </div>"""
-
 # ===================== ANALYTICS LOADER =====================
 @st.cache_data(ttl=60)
 def load_analytics():
     items    = pd.read_sql_table("receipt_items", engine)
     receipts = pd.read_sql_table("receipts", engine)
     return items, receipts
+
+# ===================== SIDEBAR DATA LOADERS =====================
+@st.cache_data(ttl=30)
+def load_sidebar_receipts():
+    return pd.read_sql_table("receipts", engine, columns=["id","store","date","total"])
+
+@st.cache_data(ttl=30)
+def load_sidebar_items():
+    return pd.read_sql_table("receipt_items", engine, columns=["id","name","category"])
 
 # ===================== DB HELPERS =====================
 def upload_to_s3(receipt_date: date) -> Optional[str]:
@@ -892,7 +841,9 @@ def save_to_database(items_df: pd.DataFrame, receipt_date: date):
     items_df = items_df.copy()
     items_df["price"] = pd.to_numeric(items_df["price"], errors="coerce")
     items_df = items_df.dropna(subset=["price"])
+    # Allow negative prices — refund receipts have negative line items
 
+    # Validate totals
     subtotal, tax, total = split_subtotal_tax(items_df)
     parsed_total = float(st.session_state.parsed_data.get("total") or 0)
     if parsed_total > 0 and abs(total - parsed_total) > 1.0:
@@ -926,6 +877,8 @@ def save_to_database(items_df: pd.DataFrame, receipt_date: date):
         load_dynamic_categories()
         get_monthly_cost.clear()
         load_analytics.clear()
+        load_sidebar_receipts.clear()
+        load_sidebar_items.clear()
         st.rerun()
     except Exception as e:
         session.rollback()
@@ -934,11 +887,96 @@ def save_to_database(items_df: pd.DataFrame, receipt_date: date):
     finally:
         session.close()
 
+def delete_receipt(receipt_id: int):
+    session = SessionLocal()
+    try:
+        r = session.get(Receipt, receipt_id)
+        if r:
+            session.delete(r)
+            session.commit()
+            st.session_state[f"confirm_delete_receipt_{receipt_id}"] = False
+            load_dynamic_categories()
+            load_analytics.clear()
+            get_monthly_cost.clear()
+            load_sidebar_receipts.clear()
+            load_sidebar_items.clear()
+            st.sidebar.success(f"Receipt #{receipt_id} deleted.")
+            st.rerun()
+        else:
+            st.sidebar.error(f"Receipt #{receipt_id} not found.")
+    except Exception as e:
+        session.rollback()
+        st.sidebar.error(f"Delete failed: {e}")
+    finally:
+        session.close()
+
+def delete_all_data():
+    session = SessionLocal()
+    try:
+        session.query(ReceiptItem).delete()
+        session.query(Receipt).delete()
+        session.commit()
+        st.session_state["confirm_delete"] = False
+        load_dynamic_categories()
+        load_analytics.clear()
+        get_monthly_cost.clear()
+        load_sidebar_receipts.clear()
+        load_sidebar_items.clear()
+        st.sidebar.success("All data deleted.")
+        st.rerun()
+    except Exception as e:
+        session.rollback()
+        st.sidebar.error(f"Delete error: {e}")
+    finally:
+        session.close()
+
+def update_receipt_metadata(receipt_id: int, new_store: str, new_date: date, new_total: float):
+    session = SessionLocal()
+    try:
+        r = session.get(Receipt, receipt_id)
+        if not r:
+            st.sidebar.error(f"Receipt #{receipt_id} not found.")
+            return
+        r.store = new_store; r.date = new_date; r.total = float(new_total)
+        for item in r.items: item.date = new_date
+        session.commit()
+        st.sidebar.success(f"Receipt #{receipt_id} updated.")
+        st.rerun()
+    except Exception as e:
+        session.rollback()
+        st.sidebar.error(f"Update error: {e}")
+    finally:
+        session.close()
+
+def update_item_category(item_id: int, new_category: str):
+    session = SessionLocal()
+    try:
+        item = session.get(ReceiptItem, item_id)
+        if not item:
+            st.sidebar.error(f"Item #{item_id} not found.")
+            return
+        cleaned = (new_category or "").strip()
+        if not cleaned:
+            st.sidebar.error("Category cannot be empty.")
+            return
+        item.category = cleaned
+        session.commit()
+        st.sidebar.success(f"Item #{item_id} → {cleaned}")
+        load_dynamic_categories()
+        load_sidebar_items.clear()
+        load_analytics.clear()
+        st.rerun()
+    except Exception as e:
+        session.rollback()
+        st.sidebar.error(f"Update error: {e}")
+    finally:
+        session.close()
+
 # ===================== SIDEBAR =====================
 st.sidebar.title("🧾 Receipt Classifier")
 
 if DEMO_MODE:
-    st.sidebar.info("🔒 **Demo Mode** — Data management features are visible but disabled. Full functionality available in production.")
+    st.sidebar.info("🔒 **Demo Mode** — Parsing is live. Saving and editing are disabled.")
 
 # Cost monitor
 monthly_cost = get_monthly_cost()
@@ -1053,23 +1091,22 @@ st.sidebar.markdown("---")
 st.sidebar.header("Data Management")
 
 if inspect(engine).has_table("receipts"):
-    receipts_sidebar_df = pd.read_sql_table("receipts", engine, columns=["id","store","date","total"])
-    if not receipts_sidebar_df.empty:
-        receipts_sidebar_df["date"]  = pd.to_datetime(receipts_sidebar_df["date"]).dt.date
-        receipts_sidebar_df["label"] = (
-            "ID " + receipts_sidebar_df["id"].astype(str) + " | " +
-            receipts_sidebar_df["store"].astype(str) + " | " +
-            receipts_sidebar_df["date"].astype(str) + " | $" +
-            receipts_sidebar_df["total"].round(2).astype(str)
+    receipts_df = load_sidebar_receipts()
+    if not receipts_df.empty:
+        receipts_df["date"]  = pd.to_datetime(receipts_df["date"]).dt.date
+        receipts_df["label"] = (
+            "ID " + receipts_df["id"].astype(str) + " | " +
+            receipts_df["store"].astype(str) + " | " +
+            receipts_df["date"].astype(str) + " | $" +
+            receipts_df["total"].round(2).astype(str)
         )
 
         st.sidebar.subheader("Edit Receipt")
-        sel_label = st.sidebar.selectbox("Select", receipts_sidebar_df["label"],
-                                         index=None, placeholder="Select receipt…", key="sel_receipt",
-                                         disabled=DEMO_MODE)
-        if sel_label and not DEMO_MODE:
+        sel_label = st.sidebar.selectbox("Select", receipts_df["label"],
+                                         index=None, placeholder="Select receipt…", key="sel_receipt")
+        if sel_label:
             sel_id    = int(sel_label.split(" | ")[0].replace("ID ", ""))
-            edit_df   = receipts_sidebar_df[receipts_sidebar_df["id"] == sel_id][["store","date","total"]].copy()
+            edit_df   = receipts_df[receipts_df["id"] == sel_id][["store","date","total"]].copy()
             edited_r  = st.sidebar.data_editor(edit_df, hide_index=True, key=f"edit_r_{sel_id}",
                            column_config={
                                "store": st.column_config.TextColumn("Store", required=True),
@@ -1077,33 +1114,65 @@ if inspect(engine).has_table("receipts"):
                                "total": st.column_config.NumberColumn("Total", format="$%.2f"),
                            })
             if st.sidebar.button("Update Receipt", type="primary", width="stretch"):
-                pass  # disabled in demo
-        else:
-            st.sidebar.button("Update Receipt", type="primary", width="stretch", disabled=True)
-            st.sidebar.button("🗑 Delete This Receipt", width="stretch", disabled=True)
+                update_receipt_metadata(sel_id, edited_r.iloc[0]["store"],
+                                        edited_r.iloc[0]["date"], float(edited_r.iloc[0]["total"]))
+
+            confirm_key = f"confirm_delete_receipt_{sel_id}"
+            if confirm_key not in st.session_state:
+                st.session_state[confirm_key] = False
+
+            if not st.session_state[confirm_key]:
+                if st.sidebar.button("🗑 Delete This Receipt", width="stretch"):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+            else:
+                st.sidebar.warning("Delete this receipt and all its items?")
+                if st.sidebar.button("✅ Yes, delete", type="primary", width="stretch", key=f"yes_del_{sel_id}"):
+                    delete_receipt(sel_id)
+                if st.sidebar.button("❌ Cancel", width="stretch", key=f"cancel_del_{sel_id}"):
+                    st.session_state[confirm_key] = False
+                    st.rerun()
 
     st.sidebar.markdown("---")
     if inspect(engine).has_table("receipt_items"):
-        items_sidebar_df = pd.read_sql_table("receipt_items", engine, columns=["id","name","category"])
-        if not items_sidebar_df.empty:
-            items_sidebar_df["label"] = (
-                "Item " + items_sidebar_df["id"].astype(str) + " | " +
-                items_sidebar_df["name"].str[:25] + " | " +
-                items_sidebar_df["category"]
+        items_sidebar = load_sidebar_items()
+        if not items_sidebar.empty:
+            items_sidebar["label"] = (
+                "Item " + items_sidebar["id"].astype(str) + " | " +
+                items_sidebar["name"].str[:25] + " | " +
+                items_sidebar["category"]
             )
             st.sidebar.subheader("Edit Item Category")
-            st.sidebar.selectbox("Select", items_sidebar_df["label"],
-                                 index=None, placeholder="Select item…", key="sel_item",
-                                 disabled=DEMO_MODE)
-            st.sidebar.selectbox("Category", CATEGORIES, key="demo_cat_sel", disabled=DEMO_MODE)
-            st.sidebar.text_input("Or custom category", key="demo_cat_txt", disabled=DEMO_MODE)
-            st.sidebar.button("Update Category", width="stretch", disabled=DEMO_MODE)
+            sel_item = st.sidebar.selectbox("Select", items_sidebar["label"],
+                                            index=None, placeholder="Select item…", key="sel_item")
+            if sel_item:
+                sel_item_id  = int(sel_item.split(" | ")[0].replace("Item ", ""))
+                curr_cat     = items_sidebar[items_sidebar["id"] == sel_item_id]["category"].iloc[0]
+                cat_select   = st.sidebar.selectbox("Category", CATEGORIES,
+                                    index=CATEGORIES.index(curr_cat) if curr_cat in CATEGORIES else 0,
+                                    key=f"cat_sel_{sel_item_id}")
+                cat_custom   = st.sidebar.text_input("Or custom category", key=f"cat_txt_{sel_item_id}")
+                final_cat    = cat_custom.strip() or cat_select
+                if st.sidebar.button("Update Category", width="stretch"):
+                    update_item_category(sel_item_id, final_cat)
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("⚠️ Danger Zone")
-    st.sidebar.button("Delete ALL Receipts", width="stretch", disabled=DEMO_MODE)
-    if DEMO_MODE:
-        st.sidebar.caption("🔒 Disabled in demo mode")
+    if "confirm_delete" not in st.session_state:
+        st.session_state["confirm_delete"] = False
+
+    if not st.session_state["confirm_delete"]:
+        if st.sidebar.button("Delete ALL Receipts", width="stretch"):
+            st.session_state["confirm_delete"] = True
+            st.rerun()
+    else:
+        st.sidebar.warning("Are you sure? This cannot be undone.")
+        if st.sidebar.button("✅ Yes, delete everything", type="primary", width="stretch"):
+            delete_all_data()
+        if st.sidebar.button("❌ Cancel", width="stretch"):
+            st.session_state["confirm_delete"] = False
+            st.rerun()
+
 
 # ===================== MAIN =====================
 st.title("🧾 Receipt Classifier")
@@ -1126,6 +1195,7 @@ if (st.session_state.parsed_data is not None
     df = st.session_state.df_to_save.copy()
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df = df.dropna(subset=["price"])
+    # Allow negative prices for refunds
     st.session_state.df_to_save = df
 
     try:
@@ -1136,17 +1206,26 @@ if (st.session_state.parsed_data is not None
 
     receipt_date = st.date_input("Receipt Date", parsed_date, key="receipt_date_input")
 
+    # Ensure columns exist
+    display_df = st.session_state.df_to_save.copy()
+    if "item_tax" not in display_df.columns:
+        display_df["item_tax"] = 0.0
+    if "discount" not in display_df.columns:
+        display_df["discount"] = 0.0
+    if "sub_category" not in display_df.columns:
+        display_df["sub_category"] = ""
+
     edited_df = st.data_editor(
-        st.session_state.df_to_save, num_rows="dynamic",
+        display_df, num_rows="dynamic",
         column_config={
             "name":         st.column_config.TextColumn("Item",         required=True),
             "category":     st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
             "sub_category": st.column_config.TextColumn("Sub-category"),
             "base_price":   st.column_config.NumberColumn("Base $",     format="$%.2f"),
-            "discount":     st.column_config.NumberColumn("Discount",   format="$%.2f"),
+            "discount":     st.column_config.NumberColumn("Discount $", format="$%.2f"),
+            "item_tax":     st.column_config.NumberColumn("Tax $",      format="$%.2f"),
             "price":        st.column_config.NumberColumn("Net $",      required=True, format="$%.2f"),
             "taxable":      st.column_config.CheckboxColumn("Taxable"),
-            "item_tax":     st.column_config.NumberColumn("Item Tax",   format="$%.2f"),
         },
         key="receipt_editor",
     )
@@ -1171,7 +1250,7 @@ if (st.session_state.parsed_data is not None
     st.markdown("---")
     if DEMO_MODE:
         st.button("💾 Save to Database", type="primary", width="stretch", disabled=True,
-                  help="🔒 Disabled in demo mode — saving is available in the full version")
+                  help="🔒 Disabled in demo mode")
     else:
         if st.button("💾 Save to Database", type="primary", width="stretch"):
             save_to_database(st.session_state.df_to_save, receipt_date)
@@ -1227,20 +1306,32 @@ if inspect(engine).has_table("receipt_items"):
             fig_cat.update_layout(
                 yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
                 coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                margin=dict(l=10, r=140, t=40, b=10), font=dict(size=13),
+                margin=dict(l=10, r=160, t=40, b=10), font=dict(size=13),
                 uniformtext=dict(mode="hide", minsize=10),
                 xaxis=dict(showticklabels=False, showgrid=False),
             )
-            col1.plotly_chart(fig_cat, width="stretch")
+            col1.plotly_chart(fig_cat, use_container_width=True)
 
+            cat_total = cat.sum()
+            cat_pct = (cat / cat_total * 100).round(1)
+            cat_df = cat.reset_index()
+            cat_df["pct"] = cat_pct.values
             fig_pie = px.pie(
-                cat.reset_index(), names="category", values="price",
+                cat_df, names="category", values="price",
                 title="Category Share", hole=0.45,
                 color_discrete_sequence=px.colors.qualitative.Set3,
             )
-            fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-            fig_pie.update_layout(showlegend=False, margin=dict(l=10, r=10, t=40, b=10), font=dict(size=13))
-            col2.plotly_chart(fig_pie, width="stretch")
+            fig_pie.update_traces(
+                textposition="inside", textinfo="percent+label",
+                insidetextorientation="radial",
+                hovertemplate="<b>%{label}</b><br>$%{value:,.2f} (%{percent})<extra></extra>",
+            )
+            fig_pie.update_layout(
+                showlegend=True,
+                legend=dict(orientation="v", x=1.02, y=0.5, font=dict(size=11)),
+                margin=dict(l=10, r=120, t=40, b=10), font=dict(size=12),
+            )
+            col2.plotly_chart(fig_pie, use_container_width=True)
 
             monthly = items.groupby("month_label")["price"].sum().reset_index().sort_values("month_label")
             fig_m = px.bar(
@@ -1269,17 +1360,14 @@ if inspect(engine).has_table("receipt_items"):
 
             st.caption(f"**{len(cat_items)} items** totalling **${cat_items['price'].sum():,.2f}** in *{selected_cat}*")
 
+            # Top items bar chart
             top_items = cat_items.groupby("name")["price"].sum().sort_values(ascending=False).head(15)
             fig_items = px.bar(
                 top_items.reset_index(), x="price", y="name", orientation="h",
                 title=f"Top items in {selected_cat}", text="price",
                 color="price", color_continuous_scale="Teal",
             )
-            fig_items.update_traces(
-                texttemplate="$%{text:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
+            fig_items.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", cliponaxis=False)
             fig_items.update_layout(
                 yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
                 coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
@@ -1287,62 +1375,49 @@ if inspect(engine).has_table("receipt_items"):
                 uniformtext=dict(mode="hide", minsize=10),
                 xaxis=dict(showticklabels=False, showgrid=False),
             )
-            st.plotly_chart(fig_items, width="stretch")
+            st.plotly_chart(fig_items, use_container_width=True)
 
-            # Editable table — only shown in non-demo mode
-            if DEMO_MODE:
-                st.caption("🔒 *Inline recategorization is available in the full version.*")
-            else:
-                st.markdown("**Recategorize items — edit the Category column then click Save Changes**")
-                edit_cat_df = cat_items[["id", "name", "category", "sub_category", "price", "date"]].copy() if "sub_category" in cat_items.columns else cat_items[["id", "name", "category", "price", "date"]].copy()
-                edit_cat_df["date"] = edit_cat_df["date"].dt.date
+            # Editable table with inline recategorize
+            st.markdown("**Recategorize items — edit the Category column then click Save Changes**")
+            edit_cat_df = cat_items[["id", "name", "category", "price", "date"]].copy()
+            edit_cat_df["date"] = edit_cat_df["date"].dt.date
 
-                edited_cat = st.data_editor(
-                    edit_cat_df,
-                    column_config={
-                        "id":       st.column_config.NumberColumn("ID",    disabled=True),
-                        "name":     st.column_config.TextColumn("Item",    disabled=True),
-                        "date":     st.column_config.DateColumn("Date",    disabled=True),
-                        "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
-                        "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
-                    },
-                    hide_index=True,
-                    num_rows="fixed",
-                    key=f"cat_editor_{selected_cat}",
-                    width="stretch",
-                )
+            edited_cat = st.data_editor(
+                edit_cat_df,
+                column_config={
+                    "id":       st.column_config.NumberColumn("ID",    disabled=True),
+                    "name":     st.column_config.TextColumn("Item",    disabled=True),
+                    "date":     st.column_config.DateColumn("Date",    disabled=True),
+                    "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
+                    "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
+                },
+                hide_index=True,
+                num_rows="fixed",
+                key=f"cat_editor_{selected_cat}",
+                width="stretch",
+            )
 
-                if st.button("💾 Save Category Changes", type="primary"):
-                    changed = edited_cat[edited_cat["category"] != cat_items["category"].values]
-                    if changed.empty:
-                        st.info("No changes detected.")
-                    else:
-                        session = SessionLocal()
-                        try:
-                            for _, row in changed.iterrows():
-                                item = session.get(ReceiptItem, int(row["id"]))
-                                if item:
-                                    item.category = row["category"]
-                            session.commit()
-                            load_dynamic_categories()
-                            load_analytics.clear()
-                            st.success(f"Updated {len(changed)} item(s).")
-                            st.rerun()
-                        except Exception as e:
-                            session.rollback()
-                            st.error(f"Save failed: {e}")
-                        finally:
-                            session.close()
-
-            # Styled preview table
-            st.markdown("**All items in this category**")
-            cat_display = cat_items[["name","category","price"]].copy() if "sub_category" not in cat_items.columns else cat_items[["name","category","sub_category","price"]].copy()
-            if "sub_category" in cat_display.columns:
-                tbl = build_styled_table(cat_display, ["name","category","sub_category","price"], ["Item","Category","Sub-category","Price"])
-            else:
-                tbl = build_styled_table(cat_display, ["name","category","price"], ["Item","Category","Price"])
-            import streamlit.components.v1 as components
-            components.html(tbl, height=min(60 + len(cat_display) * 46, 800), scrolling=True)
+            if st.button("💾 Save Category Changes", type="primary"):
+                changed = edited_cat[edited_cat["category"] != cat_items["category"].values]
+                if changed.empty:
+                    st.info("No changes detected.")
+                else:
+                    session = SessionLocal()
+                    try:
+                        for _, row in changed.iterrows():
+                            item = session.get(ReceiptItem, int(row["id"]))
+                            if item:
+                                item.category = row["category"]
+                        session.commit()
+                        load_dynamic_categories()
+                        load_analytics.clear()
+                        st.success(f"Updated {len(changed)} item(s).")
+                        st.rerun()
+                    except Exception as e:
+                        session.rollback()
+                        st.error(f"Save failed: {e}")
+                    finally:
+                        session.close()
 
         # ==================== MONTHLY ====================
         with tab_monthly:
@@ -1356,17 +1431,14 @@ if inspect(engine).has_table("receipt_items"):
             col2.metric("Items",     len(month_items))
             col3.metric("Receipts",  month_items["receipt_id"].nunique() if "receipt_id" in month_items.columns else "—")
 
+            # Category breakdown for selected month
             m_cat = month_items.groupby("category")["price"].sum().sort_values(ascending=False)
             fig_mcat = px.bar(
                 m_cat.reset_index(), x="price", y="category", orientation="h",
                 title=f"Category breakdown — {sel_month}", text="price",
                 color="price", color_continuous_scale="Purples",
             )
-            fig_mcat.update_traces(
-                texttemplate="$%{text:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
+            fig_mcat.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", cliponaxis=False)
             fig_mcat.update_layout(
                 yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="",
                 coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
@@ -1374,13 +1446,14 @@ if inspect(engine).has_table("receipt_items"):
                 uniformtext=dict(mode="hide", minsize=10),
                 xaxis=dict(showticklabels=False, showgrid=False),
             )
-            st.plotly_chart(fig_mcat, width="stretch")
+            st.plotly_chart(fig_mcat, use_container_width=True)
 
             st.markdown("**All items this month**")
-            display_df = month_items[["name","category","price"]].sort_values("price", ascending=False).copy()
-            tbl = build_styled_table(display_df, ["name","category","price"], ["Item","Category","Price"])
-            import streamlit.components.v1 as components
-            components.html(tbl, height=min(60 + len(display_df) * 46, 800), scrolling=True)
+            st.dataframe(
+                month_items[["name","category","price"]].sort_values("price", ascending=False)
+                    .style.format({"price": "${:,.2f}"}),
+                width="stretch",
+            )
 
         # ==================== BY STORE ====================
         with tab_store:
@@ -1391,16 +1464,11 @@ if inspect(engine).has_table("receipt_items"):
                 items_with_store = items_no_tax.copy()
                 items_with_store["store"] = "Unknown"
 
-            store_summary = (
-                items_with_store.groupby("store")["price"]
-                .agg(total="sum", visits=lambda x: x.index.nunique())
-                .reset_index()
-                .sort_values("total", ascending=False)
-            )
+            store_summary = items_with_store.groupby("store")["price"].sum().reset_index().sort_values("price", ascending=False)
+            store_summary.columns = ["store", "total"]
             receipt_counts = items_with_store.groupby("store")["receipt_id"].nunique().reset_index()
             receipt_counts.columns = ["store","receipts"]
             store_summary = store_summary.merge(receipt_counts, on="store")
-            store_summary = store_summary[["store","total","receipts"]].sort_values("total", ascending=False)
 
             fig_store = px.bar(
                 store_summary, x="total", y="store", orientation="h",
@@ -1415,17 +1483,11 @@ if inspect(engine).has_table("receipt_items"):
                 uniformtext=dict(mode="hide", minsize=10),
                 xaxis=dict(showticklabels=False, showgrid=False),
             )
-            st.plotly_chart(fig_store, width="stretch")
+            st.plotly_chart(fig_store, use_container_width=True)
 
-            store_tbl = build_styled_table(
-                store_summary, ["store","receipts","total"], ["Store","Receipts","Total"],
-                price_col="total", show_footer=False,
-            )
-            import streamlit.components.v1 as components
-            components.html(store_tbl, height=min(60 + len(store_summary) * 46, 400), scrolling=False)
+            st.dataframe(store_summary.style.format({"total": "${:,.2f}"}), hide_index=True, width="stretch")
 
             st.markdown("---")
-
             stores = sorted(items_with_store["store"].unique().tolist())
             sel_store = st.selectbox("Drill into store", stores)
             store_items = items_with_store[items_with_store["store"] == sel_store]
@@ -1448,7 +1510,7 @@ if inspect(engine).has_table("receipt_items"):
                 uniformtext=dict(mode="hide", minsize=10),
                 xaxis=dict(showticklabels=False, showgrid=False),
             )
-            st.plotly_chart(fig_sc, width="stretch")
+            st.plotly_chart(fig_sc, use_container_width=True)
 
             store_monthly = store_items.groupby("month_label")["price"].sum().reset_index().sort_values("month_label")
             if not store_monthly.empty:
@@ -1466,12 +1528,10 @@ if inspect(engine).has_table("receipt_items"):
                 )
                 fig_sm.update_xaxes(showgrid=False)
                 fig_sm.update_yaxes(showgrid=True, gridcolor="#f0f0f0")
-                st.plotly_chart(fig_sm, width="stretch")
+                st.plotly_chart(fig_sm, use_container_width=True)
 
         # ==================== DRILL DOWN ====================
         with tab_items:
-            if DEMO_MODE:
-                st.caption("🔒 *Recategorization saving is disabled in demo mode.*")
             st.markdown("**Search and recategorize any item across all receipts**")
 
             search = st.text_input("🔎 Search item name", placeholder="e.g. chicken, detergent…")
@@ -1489,53 +1549,45 @@ if inspect(engine).has_table("receipt_items"):
 
             st.caption(f"{len(drill_df)} items found | Total: ${drill_df['price'].sum():,.2f}")
 
-            if not DEMO_MODE:
-                edited_drill = st.data_editor(
-                    drill_df,
-                    column_config={
-                        "id":       st.column_config.NumberColumn("ID",    disabled=True),
-                        "name":     st.column_config.TextColumn("Item",    disabled=True),
-                        "date":     st.column_config.DateColumn("Date",    disabled=True),
-                        "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
-                        "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
-                    },
-                    hide_index=True,
-                    num_rows="fixed",
-                    key="drill_editor",
-                    width="stretch",
-                )
-                if st.button("💾 Save Changes", type="primary", key="drill_save"):
-                    original_cats = drill_df.set_index("id")["category"]
-                    changed = edited_drill[edited_drill.apply(
-                        lambda r: r["category"] != original_cats.get(r["id"], r["category"]), axis=1
-                    )]
-                    if changed.empty:
-                        st.info("No changes detected.")
-                    else:
-                        session = SessionLocal()
-                        try:
-                            for _, row in changed.iterrows():
-                                item = session.get(ReceiptItem, int(row["id"]))
-                                if item:
-                                    item.category = row["category"]
-                            session.commit()
-                            load_dynamic_categories()
-                            load_analytics.clear()
-                            st.success(f"Updated {len(changed)} item(s).")
-                            st.rerun()
-                        except Exception as e:
-                            session.rollback()
-                            st.error(f"Save failed: {e}")
-                        finally:
-                            session.close()
+            edited_drill = st.data_editor(
+                drill_df,
+                column_config={
+                    "id":       st.column_config.NumberColumn("ID",    disabled=True),
+                    "name":     st.column_config.TextColumn("Item",    disabled=True),
+                    "date":     st.column_config.DateColumn("Date",    disabled=True),
+                    "price":    st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
+                    "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, required=True),
+                },
+                hide_index=True,
+                num_rows="fixed",
+                key="drill_editor",
+                width="stretch",
+            )
 
-            # Styled table (always shown; only interactive in non-demo mode)
-            if not drill_df.empty:
-                drill_display = drill_df[["name","category","price","date"]].copy()
-                drill_display["date"] = drill_display["date"].astype(str)
-                tbl = build_styled_table(drill_display, ["name","category","date","price"], ["Item","Category","Date","Price"])
-                import streamlit.components.v1 as components
-                components.html(tbl, height=min(60 + len(drill_display) * 46, 800), scrolling=True)
+            if st.button("💾 Save Changes", type="primary", key="drill_save"):
+                original_cats = drill_df.set_index("id")["category"]
+                changed = edited_drill[edited_drill.apply(
+                    lambda r: r["category"] != original_cats.get(r["id"], r["category"]), axis=1
+                )]
+                if changed.empty:
+                    st.info("No changes detected.")
+                else:
+                    session = SessionLocal()
+                    try:
+                        for _, row in changed.iterrows():
+                            item = session.get(ReceiptItem, int(row["id"]))
+                            if item:
+                                item.category = row["category"]
+                        session.commit()
+                        load_dynamic_categories()
+                        load_analytics.clear()
+                        st.success(f"Updated {len(changed)} item(s).")
+                        st.rerun()
+                    except Exception as e:
+                        session.rollback()
+                        st.error(f"Save failed: {e}")
+                    finally:
+                        session.close()
 
         # ==================== API LOG ====================
         with tab_api:
@@ -1544,70 +1596,11 @@ if inspect(engine).has_table("receipt_items"):
                 if not logs_df.empty:
                     logs_df["created_at"] = pd.to_datetime(logs_df["created_at"])
                     logs_df = logs_df.sort_values("created_at", ascending=False).head(50)
-
-                    MODEL_COLORS = {
-                        "gpt-4.1-mini": ("#eef4ff", "#2563eb"),
-                        "gpt-4o-mini":  ("#f0fdf4", "#16a34a"),
-                    }
-                    PURPOSE_COLORS = {
-                        "parse_text":   ("#fff7ed", "#c2410c"),
-                        "parse_image":  ("#fdf4ff", "#7e22ce"),
-                    }
-
-                    rows_html = ""
-                    for _, row in logs_df.iterrows():
-                        ts     = str(row["created_at"])[:19].replace("T", " ")
-                        model  = str(row["model"])
-                        purpose= str(row.get("purpose") or "—")
-                        inp    = int(row.get("input_tokens") or 0)
-                        out    = int(row.get("output_tokens") or 0)
-                        cost   = float(row.get("cost_usd") or 0)
-
-                        mbg, mfg = MODEL_COLORS.get(model, ("#f0f0f0", "#555"))
-                        pbg, pfg = PURPOSE_COLORS.get(purpose, ("#f5f5f5", "#666"))
-
-                        cost_color = "#dc2626" if cost > 0.005 else "#16a34a"
-
-                        rows_html += f"""
-                        <tr>
-                          <td style="padding:10px 14px; font-size:13px; color:#555; border-bottom:1px solid #f0f0f0; white-space:nowrap;">{ts}</td>
-                          <td style="padding:10px 14px; border-bottom:1px solid #f0f0f0;">
-                            <span style="background:{mbg}; color:{mfg}; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:600;">{model}</span>
-                          </td>
-                          <td style="padding:10px 14px; border-bottom:1px solid #f0f0f0;">
-                            <span style="background:{pbg}; color:{pfg}; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:600;">{purpose}</span>
-                          </td>
-                          <td style="padding:10px 14px; text-align:right; font-size:13px; color:#444; border-bottom:1px solid #f0f0f0;">{inp:,}</td>
-                          <td style="padding:10px 14px; text-align:right; font-size:13px; color:#444; border-bottom:1px solid #f0f0f0;">{out:,}</td>
-                          <td style="padding:10px 14px; text-align:right; font-size:13px; font-weight:700; color:{cost_color}; border-bottom:1px solid #f0f0f0;">${cost:.5f}</td>
-                        </tr>"""
-
-                    total_cost = logs_df["cost_usd"].sum()
-                    total_inp  = int(logs_df["input_tokens"].sum())
-                    total_out  = int(logs_df["output_tokens"].sum())
-
-                    api_table_html = f"""
-                    <div style="border-radius:12px; overflow:hidden; border:1px solid #e8e8e8; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-top:8px;">
-                      <table style="width:100%; border-collapse:collapse; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-                        <thead>
-                          <tr style="background:#f8f9fa;">
-                            {"".join(f'<th style="padding:11px 14px; text-align:{"right" if h in ("In Tokens","Out Tokens","Cost (USD)") else "left"}; font-size:11px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.6px; border-bottom:2px solid #e8e8e8;">{h}</th>' for h in ["Timestamp","Model","Purpose","In Tokens","Out Tokens","Cost (USD)"])}
-                          </tr>
-                        </thead>
-                        <tbody>{rows_html}</tbody>
-                        <tfoot>
-                          <tr style="background:#f8f9fa;">
-                            <td colspan="3" style="padding:11px 14px; font-size:13px; font-weight:700; color:#555; border-top:2px solid #e8e8e8;">Total ({len(logs_df)} calls)</td>
-                            <td style="padding:11px 14px; text-align:right; font-size:13px; font-weight:700; color:#444; border-top:2px solid #e8e8e8;">{total_inp:,}</td>
-                            <td style="padding:11px 14px; text-align:right; font-size:13px; font-weight:700; color:#444; border-top:2px solid #e8e8e8;">{total_out:,}</td>
-                            <td style="padding:11px 14px; text-align:right; font-size:15px; font-weight:800; color:#dc2626; border-top:2px solid #e8e8e8;">${total_cost:.5f}</td>
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>"""
-
-                    import streamlit.components.v1 as components
-                    components.html(api_table_html, height=min(60 + len(logs_df) * 46, 800), scrolling=True)
+                    st.dataframe(
+                        logs_df[["created_at","model","purpose","input_tokens","output_tokens","cost_usd"]]
+                        .style.format({"cost_usd": "${:.5f}"}),
+                        width="stretch",
+                    )
                 else:
                     st.info("No API calls logged yet.")
     else:
