@@ -48,16 +48,6 @@ COST_PER_1M_OUTPUT = {"gpt-4.1-mini": 1.60, "gpt-4o-mini": 0.60}
 MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
-# ===================== DEMO MODE =====================
-# DEMO_MODE is True by default if LIVE_PASSWORD is set — unlock via sidebar password
-_DEMO_MODE_DEFAULT = bool(get_secret("LIVE_PASSWORD"))  # True = start in demo, False = always live
-
-def is_demo_mode() -> bool:
-    """Returns True if in demo mode (write operations disabled)."""
-    if not get_secret("LIVE_PASSWORD"):
-        return False  # No password configured → always live
-    return not st.session_state.get("live_mode_unlocked", False)
-
 INITIAL_CATEGORIES = [
     "Meat & Seafood",
     "Produce",
@@ -102,6 +92,14 @@ S3_BUCKET          = get_secret("S3_BUCKET")
 APP_PASSWORD       = get_secret("APP_PASSWORD")        # optional password gate
 LIVE_PASSWORD      = get_secret("LIVE_PASSWORD")        # unlocks live/edit mode from demo
 DB_URL             = get_secret("DATABASE_URL")         # PostgreSQL on prod, SQLite fallback
+
+# ===================== DEMO MODE =====================
+def is_demo_mode() -> bool:
+    """Returns True if in demo mode (write operations disabled).
+    Demo mode is active when LIVE_PASSWORD is set but not yet entered this session."""
+    if not LIVE_PASSWORD:
+        return False  # No password configured → always live
+    return not st.session_state.get("live_mode_unlocked", False)
 
 # ===================== AUTHENTICATION =====================
 def check_auth() -> bool:
@@ -984,13 +982,13 @@ def update_item_category(item_id: int, new_category: str):
 st.sidebar.title("🧾 Receipt Classifier")
 
 # ---- Live mode unlock ----
-if get_secret("LIVE_PASSWORD"):
+if LIVE_PASSWORD:
     if not st.session_state.get("live_mode_unlocked", False):
         st.sidebar.info("🔒 **Demo Mode** — Parsing is live. Saving and editing are disabled.")
         with st.sidebar.expander("🔑 Unlock Live Mode"):
             live_pwd = st.text_input("Enter password", type="password", key="live_pwd_input")
             if st.button("Unlock", key="live_unlock_btn"):
-                if live_pwd == get_secret("LIVE_PASSWORD"):
+                if live_pwd == LIVE_PASSWORD:
                     st.session_state["live_mode_unlocked"] = True
                     st.rerun()
                 else:
