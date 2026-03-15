@@ -1113,25 +1113,29 @@ if inspect(engine).has_table("receipts"):
                                "date":  st.column_config.DateColumn("Date",  required=True),
                                "total": st.column_config.NumberColumn("Total", format="$%.2f"),
                            })
-            if st.sidebar.button("Update Receipt", type="primary", width="stretch"):
-                update_receipt_metadata(sel_id, edited_r.iloc[0]["store"],
-                                        edited_r.iloc[0]["date"], float(edited_r.iloc[0]["total"]))
+            if st.sidebar.button("Update Receipt", type="primary", width="stretch", disabled=DEMO_MODE):
+                if not DEMO_MODE:
+                    update_receipt_metadata(sel_id, edited_r.iloc[0]["store"],
+                                            edited_r.iloc[0]["date"], float(edited_r.iloc[0]["total"]))
 
-            confirm_key = f"confirm_delete_receipt_{sel_id}"
-            if confirm_key not in st.session_state:
-                st.session_state[confirm_key] = False
-
-            if not st.session_state[confirm_key]:
-                if st.sidebar.button("🗑 Delete This Receipt", width="stretch"):
-                    st.session_state[confirm_key] = True
-                    st.rerun()
-            else:
-                st.sidebar.warning("Delete this receipt and all its items?")
-                if st.sidebar.button("✅ Yes, delete", type="primary", width="stretch", key=f"yes_del_{sel_id}"):
-                    delete_receipt(sel_id)
-                if st.sidebar.button("❌ Cancel", width="stretch", key=f"cancel_del_{sel_id}"):
+            if not DEMO_MODE:
+                confirm_key = f"confirm_delete_receipt_{sel_id}"
+                if confirm_key not in st.session_state:
                     st.session_state[confirm_key] = False
-                    st.rerun()
+
+                if not st.session_state[confirm_key]:
+                    if st.sidebar.button("🗑 Delete This Receipt", width="stretch"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                else:
+                    st.sidebar.warning("Delete this receipt and all its items?")
+                    if st.sidebar.button("✅ Yes, delete", type="primary", width="stretch", key=f"yes_del_{sel_id}"):
+                        delete_receipt(sel_id)
+                    if st.sidebar.button("❌ Cancel", width="stretch", key=f"cancel_del_{sel_id}"):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+            else:
+                st.sidebar.button("🗑 Delete This Receipt", width="stretch", disabled=True)
 
     st.sidebar.markdown("---")
     if inspect(engine).has_table("receipt_items"):
@@ -1153,25 +1157,30 @@ if inspect(engine).has_table("receipts"):
                                     key=f"cat_sel_{sel_item_id}")
                 cat_custom   = st.sidebar.text_input("Or custom category", key=f"cat_txt_{sel_item_id}")
                 final_cat    = cat_custom.strip() or cat_select
-                if st.sidebar.button("Update Category", width="stretch"):
-                    update_item_category(sel_item_id, final_cat)
+                if st.sidebar.button("Update Category", width="stretch", disabled=DEMO_MODE):
+                    if not DEMO_MODE:
+                        update_item_category(sel_item_id, final_cat)
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("⚠️ Danger Zone")
-    if "confirm_delete" not in st.session_state:
-        st.session_state["confirm_delete"] = False
-
-    if not st.session_state["confirm_delete"]:
-        if st.sidebar.button("Delete ALL Receipts", width="stretch"):
-            st.session_state["confirm_delete"] = True
-            st.rerun()
-    else:
-        st.sidebar.warning("Are you sure? This cannot be undone.")
-        if st.sidebar.button("✅ Yes, delete everything", type="primary", width="stretch"):
-            delete_all_data()
-        if st.sidebar.button("❌ Cancel", width="stretch"):
+    if not DEMO_MODE:
+        if "confirm_delete" not in st.session_state:
             st.session_state["confirm_delete"] = False
-            st.rerun()
+
+        if not st.session_state["confirm_delete"]:
+            if st.sidebar.button("Delete ALL Receipts", width="stretch"):
+                st.session_state["confirm_delete"] = True
+                st.rerun()
+        else:
+            st.sidebar.warning("Are you sure? This cannot be undone.")
+            if st.sidebar.button("✅ Yes, delete everything", type="primary", width="stretch"):
+                delete_all_data()
+            if st.sidebar.button("❌ Cancel", width="stretch"):
+                st.session_state["confirm_delete"] = False
+                st.rerun()
+    else:
+        st.sidebar.button("Delete ALL Receipts", width="stretch", disabled=True)
+        st.sidebar.caption("🔒 Disabled in demo mode")
 
 
 # ===================== MAIN =====================
