@@ -49,7 +49,7 @@ MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
 # ===================== DEMO MODE =====================
-DEMO_MODE = True  # Set to True to disable write operations (for public demos)
+DEMO_MODE = True # Set to True to disable write operations (for public demos)
 
 INITIAL_CATEGORIES = [
     "Meat & Seafood",
@@ -1102,23 +1102,24 @@ if inspect(engine).has_table("receipts"):
         )
 
         st.sidebar.subheader("Edit Receipt")
-        sel_label = st.sidebar.selectbox("Select", receipts_df["label"],
-                                         index=None, placeholder="Select receipt…", key="sel_receipt")
-        if sel_label:
-            sel_id    = int(sel_label.split(" | ")[0].replace("ID ", ""))
-            edit_df   = receipts_df[receipts_df["id"] == sel_id][["store","date","total"]].copy()
-            edited_r  = st.sidebar.data_editor(edit_df, hide_index=True, key=f"edit_r_{sel_id}",
-                           column_config={
-                               "store": st.column_config.TextColumn("Store", required=True),
-                               "date":  st.column_config.DateColumn("Date",  required=True),
-                               "total": st.column_config.NumberColumn("Total", format="$%.2f"),
-                           })
-            if st.sidebar.button("Update Receipt", type="primary", width="stretch", disabled=DEMO_MODE):
-                if not DEMO_MODE:
+        if DEMO_MODE:
+            st.sidebar.caption("🔒 Disabled in demo mode")
+        else:
+            sel_label = st.sidebar.selectbox("Select", receipts_df["label"],
+                                             index=None, placeholder="Select receipt…", key="sel_receipt")
+            if sel_label:
+                sel_id    = int(sel_label.split(" | ")[0].replace("ID ", ""))
+                edit_df   = receipts_df[receipts_df["id"] == sel_id][["store","date","total"]].copy()
+                edited_r  = st.sidebar.data_editor(edit_df, hide_index=True, key=f"edit_r_{sel_id}",
+                               column_config={
+                                   "store": st.column_config.TextColumn("Store", required=True),
+                                   "date":  st.column_config.DateColumn("Date",  required=True),
+                                   "total": st.column_config.NumberColumn("Total", format="$%.2f"),
+                               })
+                if st.sidebar.button("Update Receipt", type="primary", width="stretch"):
                     update_receipt_metadata(sel_id, edited_r.iloc[0]["store"],
                                             edited_r.iloc[0]["date"], float(edited_r.iloc[0]["total"]))
 
-            if not DEMO_MODE:
                 confirm_key = f"confirm_delete_receipt_{sel_id}"
                 if confirm_key not in st.session_state:
                     st.session_state[confirm_key] = False
@@ -1134,8 +1135,6 @@ if inspect(engine).has_table("receipts"):
                     if st.sidebar.button("❌ Cancel", width="stretch", key=f"cancel_del_{sel_id}"):
                         st.session_state[confirm_key] = False
                         st.rerun()
-            else:
-                st.sidebar.button("🗑 Delete This Receipt", width="stretch", disabled=True)
 
     st.sidebar.markdown("---")
     if inspect(engine).has_table("receipt_items"):
