@@ -49,7 +49,7 @@ MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
 # ===================== DEMO MODE =====================
-DEMO_MODE = True  # Set to False to enable full data management features
+DEMO_MODE = False  # Set to False to enable full data management features
 
 INITIAL_CATEGORIES = [
     "Meat & Seafood",
