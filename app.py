@@ -49,7 +49,14 @@ MONTHLY_COST_LIMIT_USD = 20.0   # warn if exceeded
 MAX_FILE_SIZE_MB       = 10
 
 # ===================== DEMO MODE =====================
-DEMO_MODE = True  
+# DEMO_MODE is True by default if LIVE_PASSWORD is set — unlock via sidebar password
+_DEMO_MODE_DEFAULT = bool(get_secret("LIVE_PASSWORD"))  # True = start in demo, False = always live
+
+def is_demo_mode() -> bool:
+    """Returns True if in demo mode (write operations disabled)."""
+    if not get_secret("LIVE_PASSWORD"):
+        return False  # No password configured → always live
+    return not st.session_state.get("live_mode_unlocked", False)
 
 INITIAL_CATEGORIES = [
     "Meat & Seafood",
@@ -93,6 +100,7 @@ AWS_SECRET_ACCESS_KEY = get_secret("AWS_SECRET_ACCESS_KEY")
 AWS_DEFAULT_REGION = get_secret("AWS_DEFAULT_REGION", "us-east-1")
 S3_BUCKET          = get_secret("S3_BUCKET")
 APP_PASSWORD       = get_secret("APP_PASSWORD")        # optional password gate
+LIVE_PASSWORD      = get_secret("LIVE_PASSWORD")        # unlocks live/edit mode from demo
 DB_URL             = get_secret("DATABASE_URL")         # PostgreSQL on prod, SQLite fallback
 
 # ===================== AUTHENTICATION =====================
@@ -975,8 +983,23 @@ def update_item_category(item_id: int, new_category: str):
 # ===================== SIDEBAR =====================
 st.sidebar.title("🧾 Receipt Classifier")
 
-if DEMO_MODE:
-    st.sidebar.info("🔒 **Demo Mode** — Parsing is live. Saving and editing are disabled.")
+# ---- Live mode unlock ----
+if get_secret("LIVE_PASSWORD"):
+    if not st.session_state.get("live_mode_unlocked", False):
+        st.sidebar.info("🔒 **Demo Mode** — Parsing is live. Saving and editing are disabled.")
+        with st.sidebar.expander("🔑 Unlock Live Mode"):
+            live_pwd = st.text_input("Enter password", type="password", key="live_pwd_input")
+            if st.button("Unlock", key="live_unlock_btn"):
+                if live_pwd == get_secret("LIVE_PASSWORD"):
+                    st.session_state["live_mode_unlocked"] = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password.")
+    else:
+        st.sidebar.success("✅ Live Mode — all features enabled.")
+        if st.sidebar.button("🔒 Lock (return to demo)", key="lock_btn"):
+            st.session_state["live_mode_unlocked"] = False
+            st.rerun()
 
 # Cost monitor
 monthly_cost = get_monthly_cost()
@@ -1102,7 +1125,7 @@ if inspect(engine).has_table("receipts"):
         )
 
         st.sidebar.subheader("Edit Receipt")
-        if DEMO_MODE:
+        if is_demo_mode():
             st.sidebar.caption("🔒 Disabled in demo mode")
         else:
             sel_label = st.sidebar.selectbox("Select", receipts_df["label"],
@@ -1146,7 +1169,7 @@ if inspect(engine).has_table("receipts"):
                 items_sidebar["category"]
             )
             st.sidebar.subheader("Edit Item Category")
-            if DEMO_MODE:
+            if is_demo_mode():
                 st.sidebar.caption("🔒 Disabled in demo mode")
             else:
                 sel_item = st.sidebar.selectbox("Select", items_sidebar["label"],
@@ -1164,7 +1187,7 @@ if inspect(engine).has_table("receipts"):
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("⚠️ Danger Zone")
-    if not DEMO_MODE:
+    if not is_demo_mode():
         if "confirm_delete" not in st.session_state:
             st.session_state["confirm_delete"] = False
 
@@ -1188,7 +1211,7 @@ if inspect(engine).has_table("receipts"):
 st.title("🧾 Receipt Classifier")
 st.caption("Upload → Parse → Review → Save | Analytics")
 
-if DEMO_MODE:
+if is_demo_mode():
     st.warning("🔒 **Demo Mode** — Parsing and analytics are fully live. Saving receipts and editing data are disabled to protect the shared database.")
 
 # ---- Review & Edit ----
@@ -1225,7 +1248,7 @@ if (st.session_state.parsed_data is not None
     if "sub_category" not in display_df.columns:
         display_df["sub_category"] = ""
 
-    if DEMO_MODE:
+    if is_demo_mode():
         edited_df = display_df  # read-only in demo mode
         st.dataframe(
             display_df[["name","category","sub_category","base_price","discount","item_tax","price"]].style.format({
@@ -1267,7 +1290,7 @@ if (st.session_state.parsed_data is not None
     )
 
     st.markdown("---")
-    if DEMO_MODE:
+    if is_demo_mode():
         st.button("💾 Save to Database", type="primary", width="stretch", disabled=True,
                   help="🔒 Disabled in demo mode")
     else:
@@ -1397,7 +1420,7 @@ if inspect(engine).has_table("receipt_items"):
             st.plotly_chart(fig_items, use_container_width=True)
 
             # Editable table with inline recategorize
-            if DEMO_MODE:
+            if is_demo_mode():
                 st.caption("🔒 *Recategorization is disabled in demo mode.*")
                 st.dataframe(
                     cat_items[["name","category","price"]].style.format({"price": "${:,.2f}"}),
@@ -1575,7 +1598,7 @@ if inspect(engine).has_table("receipt_items"):
 
             st.caption(f"{len(drill_df)} items found | Total: ${drill_df['price'].sum():,.2f}")
 
-            if DEMO_MODE:
+            if is_demo_mode():
                 st.caption("🔒 *Recategorization is disabled in demo mode.*")
                 st.dataframe(
                     drill_df[["name","category","price","date"]].style.format({"price": "${:,.2f}"}),
