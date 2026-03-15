@@ -1147,18 +1147,20 @@ if inspect(engine).has_table("receipts"):
                 items_sidebar["category"]
             )
             st.sidebar.subheader("Edit Item Category")
-            sel_item = st.sidebar.selectbox("Select", items_sidebar["label"],
-                                            index=None, placeholder="Select item…", key="sel_item")
-            if sel_item:
-                sel_item_id  = int(sel_item.split(" | ")[0].replace("Item ", ""))
-                curr_cat     = items_sidebar[items_sidebar["id"] == sel_item_id]["category"].iloc[0]
-                cat_select   = st.sidebar.selectbox("Category", CATEGORIES,
-                                    index=CATEGORIES.index(curr_cat) if curr_cat in CATEGORIES else 0,
-                                    key=f"cat_sel_{sel_item_id}")
-                cat_custom   = st.sidebar.text_input("Or custom category", key=f"cat_txt_{sel_item_id}")
-                final_cat    = cat_custom.strip() or cat_select
-                if st.sidebar.button("Update Category", width="stretch", disabled=DEMO_MODE):
-                    if not DEMO_MODE:
+            if DEMO_MODE:
+                st.sidebar.caption("🔒 Disabled in demo mode")
+            else:
+                sel_item = st.sidebar.selectbox("Select", items_sidebar["label"],
+                                                index=None, placeholder="Select item…", key="sel_item")
+                if sel_item:
+                    sel_item_id  = int(sel_item.split(" | ")[0].replace("Item ", ""))
+                    curr_cat     = items_sidebar[items_sidebar["id"] == sel_item_id]["category"].iloc[0]
+                    cat_select   = st.sidebar.selectbox("Category", CATEGORIES,
+                                        index=CATEGORIES.index(curr_cat) if curr_cat in CATEGORIES else 0,
+                                        key=f"cat_sel_{sel_item_id}")
+                    cat_custom   = st.sidebar.text_input("Or custom category", key=f"cat_txt_{sel_item_id}")
+                    final_cat    = cat_custom.strip() or cat_select
+                    if st.sidebar.button("Update Category", width="stretch"):
                         update_item_category(sel_item_id, final_cat)
 
     st.sidebar.markdown("---")
